@@ -8,6 +8,7 @@ from temp_ctrl import (
     update_pid_display,
     pipe_to_response
 )
+from bmp390 import update_bmp390_ui
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PID REGEX
@@ -29,6 +30,12 @@ _PID_RE_2 = re.compile(
     r"PV=([+-]?\d+\.\d+)\s+"
     r"OUT=([+-]?\d+\.\d+)\s+"
     r"ERR=([+-]?\d+\.\d+)"
+)
+
+_BMP390_CLI_RE = re.compile(
+    r"Temp:\s*([+-]?\d+(?:\.\d+)?)\s*C\s+"
+    r"Pressure:\s*([+-]?\d+(?:\.\d+)?)\s*Pa",
+    re.IGNORECASE
 )
 
 MAX_HISTORY = 50000
@@ -158,16 +165,43 @@ def parse_uart_line(line: str):
 
     # ====================== SENSOR PARSERS ======================
     try:
+        m = _BMP390_CLI_RE.search(line)
+        if m:
+            global_var.bmp390_temp = float(m.group(1))
+            global_var.bmp390_press = float(m.group(2))
+            if global_var.window:
+                update_bmp390_ui(
+                    global_var.window,
+                    global_var.bmp390_temp,
+                    global_var.bmp390_press,
+                    "Pa"
+                )
+            return
+
         if line.startswith("NTC"):
             key, val = line.split(":", 1)
             global_var.ntc_temp[key.strip()] = int(val.strip())
 
         elif line.startswith("BMP_TEMP"):
             _, val = line.split(":", 1)
-            global_var.bmp390_temp = int(val.strip())
+            global_var.bmp390_temp = float(val.strip())
+            if global_var.window:
+                update_bmp390_ui(
+                    global_var.window,
+                    global_var.bmp390_temp,
+                    global_var.bmp390_press,
+                    "hPa"
+                )
 
         elif line.startswith("BMP_PRESS"):
             _, val = line.split(":", 1)
-            global_var.bmp390_press = int(val.strip())
+            global_var.bmp390_press = float(val.strip())
+            if global_var.window:
+                update_bmp390_ui(
+                    global_var.window,
+                    global_var.bmp390_temp,
+                    global_var.bmp390_press,
+                    "hPa"
+                )
     except Exception as e:
         print("Sensor parse error:", e)

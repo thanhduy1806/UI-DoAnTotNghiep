@@ -173,21 +173,21 @@ from PyQt5.QtCore import Qt
 
 
 # ─── Palette ──────────────────────────────────────────────────────────────────
-BG_SURFACE  = "#111520"
-BORDER      = "#1E2840"
+BG_SURFACE  = "#131B2A"
+BORDER      = "#2B3B5E"
 ACCENT_CYAN = "#00C8E8"
 ACCENT_TEAL = "#00E5B0"
 ACCENT_ERR  = "#FF5C5C"
-TEXT_PRIM   = "#E8ECF4"
-TEXT_SEC    = "#7A8BA8"
+TEXT_PRIM   = "#F4F8FF"
+TEXT_SEC    = "#B9C7DD"
 
 
 def _field_row(label_text: str, widget) -> QHBoxLayout:
     """Utility: return a label + widget row."""
     row = QHBoxLayout()
     lbl = QLabel(label_text)
-    lbl.setFixedWidth(55)
-    lbl.setStyleSheet(f"color: {TEXT_SEC}; font-size: 11px;")
+    lbl.setFixedWidth(70)
+    lbl.setStyleSheet(f"color: {TEXT_SEC}; font-size: 13px; font-weight: 600;")
     row.addWidget(lbl)
     row.addWidget(widget)
     return row
@@ -196,16 +196,16 @@ def _field_row(label_text: str, widget) -> QHBoxLayout:
 def _input(placeholder: str, default: str = "") -> QLineEdit:
     e = QLineEdit(default)
     e.setPlaceholderText(placeholder)
-    e.setFixedHeight(28)
+    e.setFixedHeight(34)
     e.setStyleSheet(f"""
         QLineEdit {{
             background: {BG_SURFACE};
-            border: 1px solid {BORDER};
+            border: 1.5px solid {BORDER};
             border-radius: 6px;
             color: {ACCENT_CYAN};
-            font-size: 12px;
-            font-weight: 600;
-            padding: 2px 8px;
+            font-size: 14px;
+            font-weight: 700;
+            padding: 3px 10px;
         }}
         QLineEdit:focus {{ border-color: {ACCENT_CYAN}; }}
     """)
@@ -238,7 +238,8 @@ def create_auto_group_box(parent):
     parent.auto_status.setAlignment(Qt.AlignCenter)
     parent.auto_status.setStyleSheet(f"""
         color: {TEXT_SEC};
-        font-size: 10px;
+        font-size: 13px;
+        font-weight: 600;
         font-style: italic;
     """)
     outer.addWidget(parent.auto_status)
@@ -247,21 +248,21 @@ def create_auto_group_box(parent):
     btn_row = QHBoxLayout()
     btn_row.setSpacing(6)
 
-    start_btn = QPushButton("▶  START")
-    start_btn.setFixedHeight(34)
+    start_btn = QPushButton("START")
+    start_btn.setFixedHeight(38)
     start_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     start_btn.setStyleSheet(f"""
         QPushButton {{
-            background-color: {ACCENT_TEAL}18;
-            border: 1px solid {ACCENT_TEAL}60;
+            background-color: {ACCENT_TEAL}34;
+            border: 1.5px solid {ACCENT_TEAL}90;
             border-radius: 7px;
-            color: {ACCENT_TEAL};
-            font-size: 12px;
-            font-weight: 700;
-            letter-spacing: 1px;
+            color: #F4F8FF;
+            font-size: 13px;
+            font-weight: 800;
+            letter-spacing: 0.4px;
         }}
         QPushButton:hover {{
-            background-color: {ACCENT_TEAL}30;
+            background-color: {ACCENT_TEAL}48;
             border-color: {ACCENT_TEAL};
         }}
         QPushButton:pressed {{
@@ -270,21 +271,21 @@ def create_auto_group_box(parent):
     """)
     start_btn.clicked.connect(lambda: start_experiment(parent))
 
-    stop_btn = QPushButton("■  STOP")
-    stop_btn.setFixedHeight(34)
+    stop_btn = QPushButton("STOP")
+    stop_btn.setFixedHeight(38)
     stop_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     stop_btn.setStyleSheet(f"""
         QPushButton {{
-            background-color: {ACCENT_ERR}18;
-            border: 1px solid {ACCENT_ERR}60;
+            background-color: {ACCENT_ERR}34;
+            border: 1.5px solid {ACCENT_ERR}90;
             border-radius: 7px;
-            color: {ACCENT_ERR};
-            font-size: 12px;
-            font-weight: 700;
-            letter-spacing: 1px;
+            color: #F4F8FF;
+            font-size: 13px;
+            font-weight: 800;
+            letter-spacing: 0.4px;
         }}
         QPushButton:hover {{
-            background-color: {ACCENT_ERR}30;
+            background-color: {ACCENT_ERR}48;
             border-color: {ACCENT_ERR};
         }}
         QPushButton:pressed {{
@@ -313,7 +314,7 @@ def start_experiment(parent):
     if hasattr(parent, "auto_status"):
         parent.auto_status.setText(f"Running  {s} → {e}  @ {p}%")
         parent.auto_status.setStyleSheet(
-            f"color: #00E5B0; font-size: 10px; font-style: italic;"
+            f"color: #00E5B0; font-size: 13px; font-weight: 600; font-style: italic;"
         )
 
     if hasattr(parent, "uart"):
@@ -324,7 +325,7 @@ def stop_experiment(parent):
     if hasattr(parent, "auto_status"):
         parent.auto_status.setText("Stopped")
         parent.auto_status.setStyleSheet(
-            f"color: #FF5C5C; font-size: 10px; font-style: italic;"
+            f"color: #FF5C5C; font-size: 13px; font-weight: 600; font-style: italic;"
         )
     if hasattr(parent, "uart"):
         parent.uart.send_command("AUTO:STOP")

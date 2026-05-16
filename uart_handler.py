@@ -11,6 +11,8 @@ class UARTHandler(QObject):                    # ← kế thừa QObject
     sig_log  = pyqtSignal(str)
     sig_data = pyqtSignal(str)
 
+    _MAX_HEX_LOG_BYTES = 64
+
     def __init__(self, log_callback, data_callback):
         super().__init__()                     # ← bắt buộc khi dùng QObject
 
@@ -42,7 +44,7 @@ class UARTHandler(QObject):                    # ← kế thừa QObject
                 daemon=True
             ).start()
 
-            self.sig_log.emit(f"[UART] Connected {port}")
+            self.sig_log.emit(f"[UART] Connected {port} @ {baudrate}")
             return True
 
         except Exception as e:
@@ -74,26 +76,48 @@ class UARTHandler(QObject):                    # ← kế thừa QObject
         except Exception as e:
             self.sig_log.emit(f"[UART TX ERROR] {e}")
 
+    def _decode_rx_line(self, raw_line: bytes):
+        line = raw_line.strip(b"\r\n")
+        if not line:
+            return None, None
+
+        printable = sum(1 for b in line if b in (9, 13) or 32 <= b <= 126)
+        ratio = printable / len(line)
+
+        # Text protocol lines should be mostly printable ASCII. If the MCU sends
+        # binary/status bytes, show HEX in the log and keep them out of parsers.
+        if ratio < 0.85:
+            sample = line[:self._MAX_HEX_LOG_BYTES]
+            hex_text = " ".join(f"{b:02X}" for b in sample)
+            if len(line) > self._MAX_HEX_LOG_BYTES:
+                hex_text += " ..."
+            return None, f"[RX HEX] {hex_text}"
+
+        text = line.decode("ascii", errors="replace")
+        clean = "".join(ch for ch in text if ch == "\t" or 32 <= ord(ch) <= 126)
+        clean = clean.strip()
+        return clean or None, None
+
     # ─────────────────────────────────────────────
     # RX THREAD
     # ─────────────────────────────────────────────
     def read_thread(self):
-        buffer = ""
+        buffer = b""
         while self.running:
             try:
                 if self.ser and self.ser.in_waiting:
-                    data = self.ser.read(
-                        self.ser.in_waiting
-                    ).decode(errors="ignore")
+                    data = self.ser.read(self.ser.in_waiting)
 
                     if not data:
                         continue
 
                     buffer += data
 
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.strip()
+                    while b"\n" in buffer:
+                        raw_line, buffer = buffer.split(b"\n", 1)
+                        line, hex_log = self._decode_rx_line(raw_line)
+                        if hex_log:
+                            self.sig_log.emit(hex_log)
                         if line:
                             self.sig_log.emit(f"[RX] {line}")   # ← emit, không gọi trực tiếp
                             self.sig_data.emit(line)             # ← emit, không gọi trực tiếp

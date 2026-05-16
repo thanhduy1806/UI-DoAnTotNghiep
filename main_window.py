@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout,
     QTextEdit, QTabWidget,
-    QGridLayout, QFrame, QLabel
+    QGridLayout, QFrame, QLabel, QPushButton
 )
 from PyQt5.QtCore import QTimer
 
@@ -11,87 +11,28 @@ import pyqtgraph as pg
 import global_var
 
 # UART + Parser
-from uart_ui import create_uart_group_box
+from uart_ui import apply_uart_theme, create_uart_group_box
 from protocol_parser import parse_uart_line
 
 # Sensors
-from bmp390 import create_bmp390_show_box
+from bmp390 import apply_on_board_condition_theme, create_on_board_condition_strip
+from theme import app_stylesheet, current_theme_name, get_theme
+from theme import outline_button_style, toggle_theme
 
 # TEMP SYSTEM
 from temp_ctrl import (
+    apply_temp_ctrl_theme,
     create_temp_ctrl_tab,
     update_pid_display,
     pipe_to_response
 )
 
 from exp_manual import create_manual_group_box
+from exp_manual import apply_manual_theme
 from exp_auto import create_auto_group_box
 
 
 # ─── COLOR PALETTE ─────────────────────────────────────────────
-BG_DEEP     = "#07090F"
-BG_PANEL    = "#0D1017"
-BG_SURFACE  = "#111520"
-BG_CARD     = "#161B28"
-BORDER      = "#1E2840"
-
-ACCENT_CYAN = "#00C8E8"
-
-TEXT_PRIM   = "#E8ECF4"
-
-
-STYLESHEET = f"""
-QWidget {{
-    background-color: {BG_DEEP};
-    color: {TEXT_PRIM};
-    font-family: "Segoe UI";
-    font-size: 12px;
-}}
-
-QFrame {{
-    background-color: transparent;
-}}
-
-QGroupBox {{
-    background-color: {BG_PANEL};
-    border: 1px solid {BORDER};
-    border-radius: 8px;
-    margin-top: 18px;
-}}
-
-QGroupBox::title {{
-    color: {ACCENT_CYAN};
-    subcontrol-origin: margin;
-    left: 10px;
-    top: 2px;
-}}
-
-QTextEdit {{
-    background-color: {BG_SURFACE};
-    border: 1px solid {BORDER};
-    border-radius: 6px;
-    color: #8FBCD4;
-    font-family: Consolas;
-}}
-
-QTabWidget::pane {{
-    border: 1px solid {BORDER};
-    background: {BG_PANEL};
-}}
-
-QTabBar::tab {{
-    background: {BG_SURFACE};
-    padding: 6px;
-    border: 1px solid {BORDER};
-}}
-
-QTabBar::tab:selected {{
-    background: {BG_CARD};
-    color: {ACCENT_CYAN};
-}}
-"""
-
-
 # ═══════════════════════════════════════════════════════════════
 # MAIN WINDOW
 # ═══════════════════════════════════════════════════════════════
@@ -106,40 +47,49 @@ class CubeSatMonitor(QWidget):
 
         self.setWindowTitle("CubeSat Ground Station")
         self.resize(1600, 900)
-        self.setStyleSheet(STYLESHEET)
+        self.setStyleSheet(app_stylesheet())
+        self._log_panel_visible = True
 
         root = QVBoxLayout(self)
 
         # ── HEADER ───────────────────────────────────────────
         top = QHBoxLayout()
 
-        title = QLabel("MISSION CONTROL")
-        title.setStyleSheet("""
-            font-size: 16px;
-            color: #00C8E8;
-            font-weight: bold;
-        """)
+        self.title_label = QLabel("MISSION CONTROL")
 
-        top.addWidget(title)
+        top.addWidget(self.title_label)
+        top.addSpacing(24)
+
+        self.on_board_condition = create_on_board_condition_strip(self)
+        apply_on_board_condition_theme(self)
+        top.addWidget(self.on_board_condition)
         top.addStretch()
+
+        self.theme_btn = QPushButton()
+        self.theme_btn.setFixedWidth(120)
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        top.addWidget(self.theme_btn)
+
+        self.log_panel_btn = QPushButton("HIDE LOG")
+        self.log_panel_btn.setFixedWidth(110)
+        self.log_panel_btn.clicked.connect(self._toggle_log_panel)
+        top.addWidget(self.log_panel_btn)
 
         root.addLayout(top)
 
         # ── MAIN GRID ───────────────────────────────────────
-        grid = QGridLayout()
-        root.addLayout(grid)
+        self.main_grid = QGridLayout()
+        root.addLayout(self.main_grid)
 
-        left   = self._build_left()
-        center = self._build_center()
-        right  = self._build_right()
+        self.left_panel   = self._build_left()
+        self.center_panel = self._build_center()
+        self.right_panel  = self._build_right()
 
-        grid.addWidget(left,   0, 0)
-        grid.addWidget(center, 0, 1)
-        grid.addWidget(right,  0, 2)
+        self.main_grid.addWidget(self.left_panel,   0, 0)
+        self.main_grid.addWidget(self.center_panel, 0, 1)
+        self.main_grid.addWidget(self.right_panel,  0, 2)
 
-        grid.setColumnStretch(0, 2)
-        grid.setColumnStretch(1, 5)
-        grid.setColumnStretch(2, 2)
+        self._apply_panel_layout()
 
         # ── TIMER ───────────────────────────────────────────
         self.timer = QTimer()
@@ -149,6 +99,12 @@ class CubeSatMonitor(QWidget):
         )
 
         self.timer.start(1000)
+
+        self.bmp390_timer = QTimer()
+        self.bmp390_timer.timeout.connect(self._poll_bmp390)
+        self.bmp390_timer.start(10000)
+
+        self._apply_theme()
     
         # ═══════════════════════════════════════════════════════
     # SAFE LOG APPEND
@@ -193,6 +149,75 @@ class CubeSatMonitor(QWidget):
         except Exception as e:
             print("PID update error:", e)
 
+    def _poll_bmp390(self):
+        try:
+            if not hasattr(self, "uart") or not self.uart:
+                return
+            if not getattr(self.uart, "ser", None):
+                return
+
+            self.uart.send_command("bmp390_int_read")
+
+        except Exception as e:
+            print("BMP390 poll error:", e)
+
+    def _toggle_theme(self):
+        toggle_theme()
+        apply_temp_ctrl_theme()
+        self._rebuild_temp_ctrl_tab()
+        self._apply_theme()
+
+    def _apply_theme(self):
+        t = get_theme()
+        self.setStyleSheet(app_stylesheet())
+        self.title_label.setStyleSheet(f"""
+            font-size: 18px;
+            color: {t["accent_cyan"]};
+            font-weight: bold;
+        """)
+
+        mode = current_theme_name().upper()
+        self.theme_btn.setText(f"{mode} THEME")
+        self.theme_btn.setStyleSheet(outline_button_style(t["accent_cyan"]))
+        self.log_panel_btn.setStyleSheet(outline_button_style(t["accent_cyan"]))
+
+        apply_on_board_condition_theme(self)
+        apply_uart_theme(self)
+        apply_manual_theme(self)
+
+    def _rebuild_temp_ctrl_tab(self):
+        if not hasattr(self, "center_layout"):
+            return
+
+        old = getattr(self, "temp_ctrl_tab", None)
+        if old is not None:
+            self.center_layout.removeWidget(old)
+            old.setParent(None)
+            old.deleteLater()
+
+        self.temp_ctrl_tab = create_temp_ctrl_tab(self)
+        self.center_layout.addWidget(self.temp_ctrl_tab)
+
+    def _toggle_log_panel(self):
+        self._log_panel_visible = not self._log_panel_visible
+        self.left_panel.setVisible(self._log_panel_visible)
+        self.log_panel_btn.setText(
+            "HIDE LOG" if self._log_panel_visible else "SHOW LOG"
+        )
+        self._apply_panel_layout()
+
+    def _apply_panel_layout(self):
+        if self._log_panel_visible:
+            self.main_grid.setColumnStretch(0, 2)
+            self.main_grid.setColumnStretch(1, 5)
+            self.main_grid.setColumnStretch(2, 2)
+            self.main_grid.setColumnMinimumWidth(0, 280)
+        else:
+            self.main_grid.setColumnStretch(0, 0)
+            self.main_grid.setColumnStretch(1, 7)
+            self.main_grid.setColumnStretch(2, 2)
+            self.main_grid.setColumnMinimumWidth(0, 0)
+
     # ═══════════════════════════════════════════════════════
     # LEFT
     # ═══════════════════════════════════════════════════════
@@ -201,9 +226,6 @@ class CubeSatMonitor(QWidget):
 
         box = QFrame()
         lay = QVBoxLayout(box)
-
-        self.bmp390_box = create_bmp390_show_box(self)
-        lay.addWidget(self.bmp390_box)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -219,11 +241,11 @@ class CubeSatMonitor(QWidget):
     def _build_center(self):
 
         box = QFrame()
-        lay = QVBoxLayout(box)
+        self.center_layout = QVBoxLayout(box)
 
         self.temp_ctrl_tab = create_temp_ctrl_tab(self)
 
-        lay.addWidget(self.temp_ctrl_tab)
+        self.center_layout.addWidget(self.temp_ctrl_tab)
 
         return box
 
@@ -264,10 +286,6 @@ class CubeSatMonitor(QWidget):
 
             if not line:
                 return
-
-            # LOG
-            if hasattr(self, "log_box"):
-                self._append_log(line)
 
             # PARSER
             parse_uart_line(line)

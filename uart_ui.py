@@ -96,20 +96,20 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer
 import serial.tools.list_ports
 from uart_handler import UARTHandler
+from theme import combo_style, filled_button_style, get_theme, outline_button_style
 
 
 # ─── Palette ────────────────────────────────────────────────────────────────
-BG_SURFACE  = "#111520"
-BG_CARD     = "#161B28"
-BORDER      = "#1E2840"
-
-ACCENT_CYAN = "#00C8E8"
-ACCENT_TEAL = "#00E5B0"
-ACCENT_WARN = "#FFB347"
-ACCENT_ERR  = "#FF5C5C"
-
-TEXT_PRIM   = "#E8ECF4"
-TEXT_SEC    = "#7A8BA8"
+BAUDRATES = [
+    "9600",
+    "19200",
+    "38400",
+    "57600",
+    "115200",
+    "230400",
+    "460800",
+    "921600",
+]
 
 
 # ─── Firmware state ─────────────────────────────────────────────────────────
@@ -139,18 +139,31 @@ def create_uart_group_box(parent):
     row = QHBoxLayout()
 
     parent.port_combo = QComboBox()
+    parent.port_combo.setFixedHeight(34)
+    parent.port_combo.setStyleSheet(combo_style())
     refresh_ports(parent)
 
-    btn_refresh = QPushButton("⟳")
-    btn_refresh.setFixedWidth(28)
-    btn_refresh.clicked.connect(lambda: refresh_ports(parent))
+    parent.refresh_btn = QPushButton("Refresh")
+    parent.refresh_btn.setFixedWidth(78)
+    parent.refresh_btn.clicked.connect(lambda: refresh_ports(parent))
 
     row.addWidget(parent.port_combo)
-    row.addWidget(btn_refresh)
+    row.addWidget(parent.refresh_btn)
     lay.addLayout(row)
+
+    lay.addWidget(QLabel("Baudrate"))
+
+    parent.baud_combo = QComboBox()
+    parent.baud_combo.setEditable(True)
+    parent.baud_combo.addItems(BAUDRATES)
+    parent.baud_combo.setCurrentText("115200")
+    parent.baud_combo.setFixedHeight(34)
+    parent.baud_combo.setStyleSheet(combo_style())
+    lay.addWidget(parent.baud_combo)
 
     # ── CONNECT ─────────────────────────────────────────────────────────────
     parent.connect_btn = QPushButton("Connect")
+    parent.connect_btn.setFixedHeight(34)
     parent.connect_btn.clicked.connect(lambda: connect_uart(parent))
     lay.addWidget(parent.connect_btn)
 
@@ -162,12 +175,15 @@ def create_uart_group_box(parent):
 
     # ── ACTION ──────────────────────────────────────────────────────────────
     parent.jump_reset_btn = QPushButton("DETECT STATE ?")
+    parent.jump_reset_btn.setFixedHeight(34)
     parent.jump_reset_btn.clicked.connect(lambda: jump_or_reset(parent))
     lay.addWidget(parent.jump_reset_btn)
 
     parent.action_hint = QLabel("state unknown")
     parent.action_hint.setAlignment(Qt.AlignCenter)
     lay.addWidget(parent.action_hint)
+
+    apply_uart_theme(parent)
 
     return group
 
@@ -225,14 +241,35 @@ class _StateBadge(QLabel):
         return f"""
         QLabel {{
             background-color: {bg};
-            border: 1px solid {border};
+            border: 1.5px solid {border};
             border-radius: 6px;
             color: {fg};
             font-family: Consolas;
             font-weight: 700;
-            letter-spacing: 2px;
+            font-size: 13px;
         }}
         """
+
+
+def apply_uart_theme(parent):
+    t = get_theme()
+
+    if hasattr(parent, "port_combo"):
+        parent.port_combo.setStyleSheet(combo_style())
+    if hasattr(parent, "baud_combo"):
+        parent.baud_combo.setStyleSheet(combo_style())
+    if hasattr(parent, "refresh_btn"):
+        parent.refresh_btn.setStyleSheet(outline_button_style(t["accent_cyan"]))
+    if hasattr(parent, "connect_btn"):
+        parent.connect_btn.setStyleSheet(filled_button_style(t["accent_teal"]))
+    if hasattr(parent, "jump_reset_btn"):
+        parent.jump_reset_btn.setStyleSheet(outline_button_style(t["accent_cyan"]))
+    if hasattr(parent, "action_hint"):
+        parent.action_hint.setStyleSheet(
+            f"color:{t['text_secondary']};font-size:13px;font-weight:600;"
+        )
+    if hasattr(parent, "state_badge"):
+        parent.state_badge.set_state(parent._fw_state)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -303,16 +340,26 @@ def connect_uart(parent):
     if not port:
         return
 
+    try:
+        baudrate = int(parent.baud_combo.currentText().strip())
+        if baudrate <= 0:
+            raise ValueError
+    except Exception:
+        parent.log_box.append("[UART ERROR] Invalid baudrate")
+        return
+
     if not hasattr(parent, "uart"):
         parent.uart = UARTHandler(
             parent.log_box.append,
             parent.process_uart_data
         )
 
-    if parent.uart.connect(port):
+    if parent.uart.connect(port, baudrate):
         parent.connect_btn.setText("Disconnect")
         parent.connect_btn.clicked.disconnect()
         parent.connect_btn.clicked.connect(lambda: disconnect_uart(parent))
+        parent.port_combo.setEnabled(False)
+        parent.baud_combo.setEnabled(False)
         set_firmware_state(parent, STATE_UNKNOWN)
 
 
@@ -323,4 +370,7 @@ def disconnect_uart(parent):
     parent.connect_btn.setText("Connect")
     parent.connect_btn.clicked.disconnect()
     parent.connect_btn.clicked.connect(lambda: connect_uart(parent))
+    parent.port_combo.setEnabled(True)
+    if hasattr(parent, "baud_combo"):
+        parent.baud_combo.setEnabled(True)
     set_firmware_state(parent, STATE_UNKNOWN)

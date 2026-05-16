@@ -13,6 +13,7 @@ from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal
 import pyqtgraph as pg
 import numpy as np
 import time
+from theme import get_theme
 
 # ─── Palette (sáng hơn, dễ đọc) ──────────────────────────────────────────────
 # BG_SURFACE  = "#141C2E"
@@ -39,17 +40,17 @@ import time
 # TEXT_SEC    = "#334155"
 # TEXT_DIM    = "#64748B"
 
-BG_SURFACE  = "#282A36"
-BG_CARD     = "#44475A"
-BORDER      = "#6272A4"
-ACCENT_CYAN = "#8BE9FD"
-ACCENT_TEAL = "#50FA7B"
-ACCENT_WARN = "#FFB86C"
+BG_SURFACE  = "#131B2A"
+BG_CARD     = "#1B2740"
+BORDER      = "#385077"
+ACCENT_CYAN = "#00C8E8"
+ACCENT_TEAL = "#00E5B0"
+ACCENT_WARN = "#F59E0B"
 ACCENT_ERR  = "#FF5555"
 ACCENT_PRP  = "#BD93F9"
-TEXT_PRIM   = "#F8F8F2"
-TEXT_SEC    = "#D6D6D6"
-TEXT_DIM    = "#B0B0B0"
+TEXT_PRIM   = "#F4F8FF"
+TEXT_SEC    = "#DCE7F7"
+TEXT_DIM    = "#AFC0D8"
 
 # BG_SURFACE  = "#1A0F2E"
 # BG_CARD     = "#2A1B4A"
@@ -63,7 +64,7 @@ TEXT_DIM    = "#B0B0B0"
 # TEXT_SEC    = "#E0CCFF"
 # TEXT_DIM    = "#A388E0"
 # ─── Font Size Global ─────────────────────────────────────
-FONT_BASE = 13      # ← CHỈNH SỐ NÀY (mặc định 13)
+FONT_BASE = 14      # ← CHỈNH SỐ NÀY (mặc định 13)
 
 STEP_COLORS = {
     "NONE": ("#1E2840", "#90A8C8"),
@@ -79,6 +80,40 @@ WIZARD_TIMEOUT_MS = 10000   # 10s timeout mỗi bước
 # ═══════════════════════════════════════════════════════════════════════════════
 # WIZARD STATE MACHINE
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def apply_temp_ctrl_theme():
+    global BG_SURFACE, BG_CARD, BORDER
+    global ACCENT_CYAN, ACCENT_TEAL, ACCENT_WARN, ACCENT_ERR, ACCENT_PRP
+    global TEXT_PRIM, TEXT_SEC, TEXT_DIM, STEP_COLORS
+
+    t = get_theme()
+    BG_SURFACE = t["bg_panel"]
+    BG_CARD = t["bg_card"]
+    BORDER = t["border"]
+    ACCENT_CYAN = t["accent_cyan"]
+    ACCENT_TEAL = t["accent_teal"]
+    ACCENT_WARN = t["accent_warn"]
+    ACCENT_ERR = t["accent_err"]
+    ACCENT_PRP = t["accent_prp"]
+    TEXT_PRIM = t["text_primary"]
+    TEXT_SEC = t["text_secondary"]
+    TEXT_DIM = t["text_secondary"]
+
+    if t["bg_deep"] == "#EEF4F8":
+        STEP_COLORS = {
+            "NONE": ("#E8F2F7", "#4F6378"),
+            "HEAT": ("#F6E6C9", ACCENT_WARN),
+            "COOL": ("#D9F1F7", ACCENT_CYAN),
+            "SOAK": ("#D7F4EE", ACCENT_TEAL),
+        }
+    else:
+        STEP_COLORS = {
+            "NONE": ("#1E2840", "#90A8C8"),
+            "HEAT": ("#3A1800", "#FFBE4A"),
+            "COOL": ("#00223A", "#18E4FF"),
+            "SOAK": ("#003020", "#00FFB2"),
+        }
+
 
 WIZ_TRIGGERS = [
     "(y/n)",
@@ -161,6 +196,7 @@ class WizardStateMachine(QObject):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def create_temp_ctrl_tab(parent) -> QWidget:
+    apply_temp_ctrl_theme()
     parent._wizard_sm = None
     # Khởi tạo global_var an toàn
     import global_var
@@ -232,15 +268,15 @@ def _build_pid_graph(parent) -> QGroupBox:
     pw.setBackground(BG_CARD)
     pw.setFixedHeight(300)
     pw.showGrid(x=True, y=True, alpha=0.18)
-    pw.setLabel("left",   "°C",     color=TEXT_SEC, size="10pt")
-    pw.setLabel("bottom", "Time (s)", color=TEXT_SEC, size="10pt")
+    pw.setLabel("left",   "°C",     color=TEXT_SEC, size="11pt")
+    pw.setLabel("bottom", "Time (s)", color=TEXT_SEC, size="11pt")
     pw.getViewBox().setMouseEnabled(x=True, y=True)
 
     for name in ("left", "bottom"):
         ax = pw.getAxis(name)
         ax.setPen(pg.mkPen(color=BORDER, width=1))
         ax.setTextPen(pg.mkPen(color=TEXT_SEC))
-        ax.setStyle(tickFont=pg.QtGui.QFont("Segoe UI", 9))
+        ax.setStyle(tickFont=pg.QtGui.QFont("Segoe UI", 10))
 
     pw.addLegend(
         offset=(10, 10),
@@ -264,9 +300,9 @@ def _build_pid_graph(parent) -> QGroupBox:
     lay.addWidget(pw)
 
     btn_row = QHBoxLayout()
-    ar = _text_btn("⊞  Auto range", TEXT_SEC, hover=ACCENT_CYAN)
+    ar = _text_btn("Auto range", TEXT_SEC, hover=ACCENT_CYAN)
     ar.clicked.connect(lambda: parent._pid_plot_widget.getViewBox().autoRange())
-    cl = _text_btn("✕  Clear", TEXT_DIM, hover=ACCENT_ERR)
+    cl = _text_btn("Clear", TEXT_DIM, hover=ACCENT_ERR)
     cl.clicked.connect(lambda: _clear_pid_history(parent))
     btn_row.addWidget(ar)
     btn_row.addStretch()
@@ -393,7 +429,7 @@ def _build_profile_wizard(parent) -> QGroupBox:
     bc = QHBoxLayout()
     bc.setSpacing(8)
 
-    send_btn = _action_btn("⟳  SEND PROFILE", ACCENT_TEAL, h=38, bold=True)
+    send_btn = _action_btn("SEND PROFILE", ACCENT_TEAL, h=38, bold=True)
     send_btn.setToolTip(
         "Gửi wizard tự động — chờ từng prompt firmware\n"
         "Mode (HEAT/COOL/SOAK) do firmware tự quyết định"
@@ -401,7 +437,7 @@ def _build_profile_wizard(parent) -> QGroupBox:
     send_btn.clicked.connect(lambda: _cmd_send_wizard(parent))
     parent._wiz_send_btn = send_btn
 
-    cancel_btn = _action_btn("✕  CANCEL", ACCENT_ERR, h=38, w=100)
+    cancel_btn = _action_btn("CANCEL", ACCENT_ERR, h=38, w=100)
     cancel_btn.setVisible(False)
     cancel_btn.clicked.connect(lambda: _cmd_cancel_wizard(parent))
     parent._wiz_cancel_btn = cancel_btn
@@ -574,8 +610,8 @@ def _build_run_section(parent) -> QGroupBox:
 
     r1 = QHBoxLayout()
     r1.setSpacing(8)
-    ena = _action_btn("▶  AUTO ENA",    ACCENT_TEAL)
-    sta = _action_btn("▶▶  AUTO START", ACCENT_CYAN)
+    ena = _action_btn("AUTO ENA",    ACCENT_TEAL)
+    sta = _action_btn("AUTO START", ACCENT_CYAN)
     ena.setToolTip("temp_auto_ena <id>")
     sta.setToolTip("temp_auto_start <id>")
     ena.clicked.connect(lambda: _cmd_auto_ena(parent))
@@ -586,8 +622,8 @@ def _build_run_section(parent) -> QGroupBox:
 
     r2 = QHBoxLayout()
     r2.setSpacing(8)
-    mn = _action_btn("⚙  MANUAL",     ACCENT_WARN)
-    lg = _action_btn("◉  TOGGLE LOG", ACCENT_PRP)
+    mn = _action_btn("MANUAL",     ACCENT_WARN)
+    lg = _action_btn("TOGGLE LOG", ACCENT_PRP)
     mn.setToolTip("temp_manu <id>")
     lg.setToolTip("c — toggle NTC log")
     mn.clicked.connect(lambda: _cmd_manu(parent))
@@ -945,7 +981,7 @@ class _StepBadge(QLabel):
     def __init__(self):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
-        self.setFixedHeight(38)
+        self.setFixedHeight(42)
         self.set_step("NONE")
 
     def set_step(self, step: str):
@@ -958,7 +994,7 @@ class _StepBadge(QLabel):
                 background-color:{bg}; border:1.5px solid {fg}66;
                 border-radius:8px; color:{fg};
                 font-family:"Cascadia Code","Consolas",monospace;
-                font-size:14px; font-weight:800; letter-spacing:4px;
+                font-size:15px; font-weight:800; letter-spacing:3px;
             }}
         """)
 
@@ -975,7 +1011,7 @@ class _MetricCard(QFrame):
             }}
         """)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setFixedHeight(72)
+        self.setFixedHeight(78)
 
         lay = QVBoxLayout(self)
         lay.setSpacing(2)
@@ -984,13 +1020,13 @@ class _MetricCard(QFrame):
         self._lbl_w = QLabel(label)
         self._lbl_w.setAlignment(Qt.AlignCenter)
         self._lbl_w.setStyleSheet(
-            f"color:{TEXT_DIM};font-size:10px;font-weight:700;"
+            f"color:{TEXT_DIM};font-size:11px;font-weight:700;"
             f"letter-spacing:1.5px;background:transparent;border:none;"
         )
         self._val_w = QLabel("—")
         self._val_w.setAlignment(Qt.AlignCenter)
         self._val_w.setStyleSheet(
-            f"color:{accent};font-size:18px;font-weight:800;"
+            f"color:{accent};font-size:20px;font-weight:800;"
             f"background:transparent;border:none;"
         )
         lay.addWidget(self._lbl_w)
@@ -1000,7 +1036,7 @@ class _MetricCard(QFrame):
         accent = accent_override or self._accent
         self._val_w.setText(f"{value:+.2f} {self._unit}")
         self._val_w.setStyleSheet(
-            f"color:{accent};font-size:18px;font-weight:800;"
+            f"color:{accent};font-size:20px;font-weight:800;"
             f"background:transparent;border:none;"
         )
 
@@ -1014,14 +1050,14 @@ def _grp(title: str) -> QGroupBox:
     g.setStyleSheet(f"""
         QGroupBox {{
             background-color:{BG_SURFACE}; border:1.5px solid {BORDER};
-            border-radius:10px; margin-top:20px;
+            border-radius:10px; margin-top:22px;
             padding:8px 8px 8px 8px;
         }}
         QGroupBox::title {{
             subcontrol-origin:margin; subcontrol-position:top left;
             left:12px; top:3px;
-            color:{ACCENT_CYAN}; font-size:{FONT_BASE + 2}px; font-weight:800;
-            letter-spacing:2px;
+            color:{ACCENT_CYAN}; font-size:{FONT_BASE + 1}px; font-weight:800;
+            letter-spacing:0px;
         }}
     """)
     return g
@@ -1035,15 +1071,28 @@ def _action_btn(label, accent, h=34, w=None, bold=False):
     else:
         b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     fw = "800" if bold else "700"
+    bg = _rgba(accent, 0.22)
+    bg_hover = _rgba(accent, 0.34)
+    bg_pressed = _rgba(accent, 0.14)
+    bg_disabled = _rgba(accent, 0.08)
     b.setStyleSheet(f"""
         QPushButton{{
-            background-color:{accent}20;border:1.5px solid {accent}66;
-            border-radius:7px;color:{accent};
-            font-size:12px;font-weight:{fw};letter-spacing:0.8px;
+            background-color:{bg};
+            border:2px solid {accent};
+            border-radius:7px;color:#F8FBFF;
+            font-size:13px;font-weight:{fw};letter-spacing:0.4px;
         }}
-        QPushButton:hover{{background-color:{accent}38;border-color:{accent};}}
-        QPushButton:pressed{{background-color:{accent}12;}}
-        QPushButton:disabled{{background-color:{accent}08;border-color:{BORDER};
+        QPushButton:hover{{
+            background-color:{bg_hover};
+            border:2px solid #FFFFFF;
+        }}
+        QPushButton:pressed{{
+            background-color:{bg_pressed};
+            border:2px solid {accent};
+        }}
+        QPushButton:disabled{{
+            background-color:{bg_disabled};
+            border:2px solid {BORDER};
             color:{TEXT_DIM};}}
     """)
     return b
@@ -1051,24 +1100,31 @@ def _action_btn(label, accent, h=34, w=None, bold=False):
 
 def _text_btn(label, color, hover):
     b = QPushButton(label)
-    b.setFixedHeight(22)
+    b.setFixedHeight(26)
     b.setStyleSheet(
-        f"QPushButton{{background:transparent;border:none;"
-        f"color:{color};font-size:10px;}}"
-        f"QPushButton:hover{{color:{hover};}}"
+        f"QPushButton{{background:transparent;border:1.5px solid {BORDER};"
+        f"border-radius:5px;color:{color};font-size:12px;font-weight:600;"
+        f"padding:2px 8px;}}"
+        f"QPushButton:hover{{color:{hover};border-color:{hover};}}"
     )
     return b
 
 
 def _icon_btn(icon, accent):
     b = QPushButton(icon)
-    b.setFixedSize(30, 30)
+    b.setFixedSize(34, 34)
     b.setStyleSheet(f"""
         QPushButton{{background-color:{BG_CARD};border:1.5px solid {BORDER};
-            border-radius:6px;color:{accent};font-size:15px;font-weight:800;}}
+            border-radius:6px;color:{accent};font-size:16px;font-weight:800;}}
         QPushButton:hover{{background-color:#1C2540;border-color:{accent};}}
     """)
     return b
+
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
 
 
 # def _lbl(text, bold=False):
@@ -1118,7 +1174,7 @@ def _spinbox(lo, hi, default, tip="", w=None):
     s = QSpinBox()
     s.setRange(lo, hi)
     s.setValue(default)
-    s.setFixedHeight(30)
+    s.setFixedHeight(34)
     if w:
         s.setFixedWidth(w)
     if tip:
@@ -1131,7 +1187,7 @@ def _spinbox2(lo, hi, default, compact=False):
     s = QSpinBox()
     s.setRange(lo, hi)
     s.setValue(default)
-    s.setFixedHeight(26 if compact else 30)
+    s.setFixedHeight(30 if compact else 34)
     s.setStyleSheet(_sb_style(compact))
     return s
 
@@ -1142,7 +1198,7 @@ def _dspinbox(lo, hi, default, tip="", compact=False):
     s.setValue(default)
     s.setDecimals(2)
     s.setSingleStep(1.0)
-    s.setFixedHeight(26 if compact else 30)
+    s.setFixedHeight(30 if compact else 34)
     if tip:
         s.setToolTip(tip)
     s.setStyleSheet(_sb_style(compact))
@@ -1153,7 +1209,7 @@ def _lineedit(default, tip="", w=None):
     e = QLineEdit(default)
     if tip:
         e.setToolTip(tip)
-    e.setFixedHeight(30)
+    e.setFixedHeight(34)
     if w:
         e.setFixedWidth(w)
     e.setStyleSheet(_input_style())
@@ -1166,7 +1222,7 @@ def _sb_style(compact=False):
         QSpinBox,QDoubleSpinBox{{
             background:{BG_CARD};border:1.5px solid {BORDER};
             border-radius:6px;color:{TEXT_PRIM};
-            font-size:{fs};font-weight:600;padding:2px 6px;
+            font-size:{fs};font-weight:700;padding:3px 8px;
         }}
         QSpinBox:focus,QDoubleSpinBox:focus{{border-color:{ACCENT_CYAN};}}
         QSpinBox::up-button,QDoubleSpinBox::up-button,
@@ -1182,7 +1238,7 @@ def _input_style():
             background:{BG_CARD};border:1.5px solid {BORDER};
             border-radius:6px;color:{TEXT_PRIM};
             font-family:"Cascadia Code","Consolas",monospace;
-            font-size:11px;padding:2px 8px;
+            font-size:13px;font-weight:700;padding:3px 10px;
         }}
         QLineEdit:focus{{border-color:{ACCENT_CYAN};}}
     """
