@@ -32,6 +32,17 @@ _PID_RE_2 = re.compile(
     r"ERR=([+-]?\d+\.\d+)"
 )
 
+_PROFILE_PID_RE = re.compile(
+    r"PROFILE=(\d+)\s+"
+    r"STEP=(\S+)"
+    r"(?:\s+MODE=(\d+)\s+DUR=(\d+))?"
+    r"\s*\|\s*PID:\s*"
+    r"SP=([+-]?\d+\.\d+)\s+"
+    r"PV=([+-]?\d+\.\d+)\s+"
+    r"OUT=([+-]?\d+\.\d+)\s+"
+    r"ERR=([+-]?\d+\.\d+)"
+)
+
 _BMP390_CLI_RE = re.compile(
     r"Temp:\s*([+-]?\d+(?:\.\d+)?)\s*C\s+"
     r"Pressure:\s*([+-]?\d+(?:\.\d+)?)\s*Pa",
@@ -74,6 +85,60 @@ def _push_history():
 # MAIN PARSER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _ensure_profile_history():
+    defaults = {
+        "pid_profile_time_history": {i: [] for i in range(8)},
+        "pid_profile_pv_history": {i: [] for i in range(8)},
+        "pid_profile_sp_history": {i: [] for i in range(8)},
+        "pid_profile_err_history": {i: [] for i in range(8)},
+        "pid_profile_out_history": {i: [] for i in range(8)},
+        "pid_profile_latest": {
+            i: {"step": "NONE", "sp": 0.0, "pv": 0.0, "err": 0.0, "out": 0.0}
+            for i in range(8)
+        },
+    }
+    for name, value in defaults.items():
+        if not hasattr(global_var, name):
+            setattr(global_var, name, value)
+        for i in range(8):
+            if name == "pid_profile_latest":
+                getattr(global_var, name).setdefault(
+                    i, {"step": "NONE", "sp": 0.0, "pv": 0.0, "err": 0.0, "out": 0.0}
+                )
+            else:
+                getattr(global_var, name).setdefault(i, [])
+
+
+def _push_profile_history(profile_id, sp, pv, out, err):
+    if not hasattr(global_var, 'pid_start_time') or global_var.pid_start_time is None:
+        global_var.pid_start_time = time.time()
+
+    elapsed = time.time() - global_var.pid_start_time
+    _ensure_profile_history()
+
+    global_var.pid_profile_time_history[profile_id].append(elapsed)
+    global_var.pid_profile_pv_history[profile_id].append(pv)
+    global_var.pid_profile_sp_history[profile_id].append(sp)
+    global_var.pid_profile_err_history[profile_id].append(err)
+    global_var.pid_profile_out_history[profile_id].append(out)
+
+    if len(global_var.pid_profile_pv_history[profile_id]) > MAX_HISTORY:
+        global_var.pid_profile_time_history[profile_id].pop(0)
+        global_var.pid_profile_pv_history[profile_id].pop(0)
+        global_var.pid_profile_sp_history[profile_id].pop(0)
+        global_var.pid_profile_err_history[profile_id].pop(0)
+        global_var.pid_profile_out_history[profile_id].pop(0)
+
+
+def _selected_profile_id():
+    try:
+        if global_var.window and hasattr(global_var.window, "tc_run_profile_id"):
+            return global_var.window.tc_run_profile_id.value()
+    except Exception:
+        pass
+    return 0
+
+
 def parse_uart_line(line: str):
     line = line.strip()
     if not line:
@@ -96,6 +161,49 @@ def parse_uart_line(line: str):
             auto_detect_state(global_var.window, line)
     except Exception:
         pass
+
+    # ====================== PROFILE PID FORMAT ======================
+    try:
+        m = _PROFILE_PID_RE.search(line)
+        if m:
+            profile_id = int(m.group(1))
+            if not 0 <= profile_id < 8:
+                return
+            step = m.group(2)
+            mode = m.group(3)
+            sp = float(m.group(5))
+            pv = float(m.group(6))
+            out = float(m.group(7))
+            err = float(m.group(8))
+
+            _push_profile_history(profile_id, sp, pv, out, err)
+            if mode is not None:
+                mode_name = {"0": "SOAK", "1": "HEAT", "2": "COOL"}.get(mode, "NONE")
+                step_text = f"{step}:{mode_name}"
+            else:
+                step_text = step
+
+            global_var.pid_profile_latest[profile_id] = {
+                "step": step_text,
+                "sp": sp,
+                "pv": pv,
+                "err": err,
+                "out": out,
+            }
+
+            if profile_id == _selected_profile_id():
+                global_var.pid_step = step_text
+                global_var.pid_sp = sp
+                global_var.pid_pv = pv
+                global_var.pid_out = out
+                global_var.pid_err = err
+
+            if global_var.window:
+                update_pid_display(global_var.window)
+            return
+
+    except Exception as e:
+        print("Profile PID parse error:", e)
 
     # ====================== PID FORMAT 1 ======================
     try:

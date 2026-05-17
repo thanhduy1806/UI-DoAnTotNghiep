@@ -7,7 +7,8 @@
 from PyQt5.QtWidgets import (
     QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QFrame, QSpinBox, QDoubleSpinBox,
-    QTextEdit, QSizePolicy, QScrollArea, QComboBox
+    QTextEdit, QSizePolicy, QScrollArea, QComboBox, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal
 import pyqtgraph as pg
@@ -75,6 +76,10 @@ STEP_COLORS = {
 
 MAX_STEPS        = 8
 WIZARD_TIMEOUT_MS = 10000   # 10s timeout mỗi bước
+PROFILE_CURVE_COLORS = [
+    "#00E5B0", "#00C8E8", "#F59E0B", "#BD93F9",
+    "#FF5C5C", "#60A5FA", "#A3E635", "#F472B6",
+]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -204,6 +209,16 @@ def create_temp_ctrl_tab(parent) -> QWidget:
                 'pid_target_history_time', 'pid_target_profile']:
         if not hasattr(global_var, var):
             setattr(global_var, var, [])
+    for var in ['pid_profile_time_history', 'pid_profile_pv_history',
+                'pid_profile_sp_history', 'pid_profile_err_history',
+                'pid_profile_out_history']:
+        if not hasattr(global_var, var):
+            setattr(global_var, var, {i: [] for i in range(8)})
+    if not hasattr(global_var, 'pid_profile_latest'):
+        global_var.pid_profile_latest = {
+            i: {"step": "NONE", "sp": 0.0, "pv": 0.0, "err": 0.0, "out": 0.0}
+            for i in range(8)
+        }
     if not hasattr(global_var, 'pid_start_time'):
         global_var.pid_start_time = None
 
@@ -219,7 +234,6 @@ def create_temp_ctrl_tab(parent) -> QWidget:
     lay.addWidget(_build_pid_monitor(parent))
     lay.addWidget(_build_pid_graph(parent))
     lay.addWidget(_build_profile_wizard(parent))
-    lay.addWidget(_build_pid_section(parent))
     lay.addWidget(_build_run_section(parent))
     lay.addWidget(_build_response_box(parent), stretch=1)
 
@@ -255,6 +269,48 @@ def _build_pid_monitor(parent) -> QGroupBox:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+def _build_pid_monitor(parent) -> QGroupBox:
+    grp = _grp("PID  MONITOR  -  REALTIME")
+    lay = QVBoxLayout()
+    lay.setContentsMargins(8, 8, 8, 8)
+
+    table = QTableWidget(8, 6)
+    table.setHorizontalHeaderLabels([
+        "Profile", "Step", "Set Point °C",
+        "Measured °C", "Error °C", "Output %"
+    ])
+    table.verticalHeader().setVisible(False)
+    table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    table.setSelectionMode(QAbstractItemView.NoSelection)
+    table.setFocusPolicy(Qt.NoFocus)
+    table.setFixedHeight(270)
+    table.setStyleSheet(_pid_table_style())
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    table.horizontalHeader().setFixedHeight(30)
+    table.verticalHeader().setDefaultSectionSize(28)
+
+    parent.pid_profile_table = table
+    parent.pid_profile_table_items = {}
+    for row in range(8):
+        for col in range(6):
+            item = QTableWidgetItem()
+            item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, col, item)
+        table.item(row, 0).setText(f"P{row}")
+        parent.pid_profile_table_items[row] = {
+            "step": table.item(row, 1),
+            "sp": table.item(row, 2),
+            "pv": table.item(row, 3),
+            "err": table.item(row, 4),
+            "out": table.item(row, 5),
+        }
+
+    _refresh_pid_profile_table(parent)
+    lay.addWidget(table)
+    grp.setLayout(lay)
+    return grp
+
+
 # B.  PID GRAPH
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -266,7 +322,7 @@ def _build_pid_graph(parent) -> QGroupBox:
     pg.setConfigOptions(antialias=True)
     pw = pg.PlotWidget()
     pw.setBackground(BG_CARD)
-    pw.setFixedHeight(300)
+    pw.setFixedHeight(430)
     pw.showGrid(x=True, y=True, alpha=0.18)
     pw.setLabel("left",   "°C",     color=TEXT_SEC, size="11pt")
     pw.setLabel("bottom", "Time (s)", color=TEXT_SEC, size="11pt")
@@ -288,25 +344,44 @@ def _build_pid_graph(parent) -> QGroupBox:
     empty = np.array([], dtype=float)
 
     # PV — đường đo thực tế, nét liền xanh lá
-    parent.pid_curve_pv = pw.plot(empty, empty,
-        pen=pg.mkPen(color=ACCENT_TEAL, width=2.5), name="PV  (measured)")
-
-    # TARGET — đường mục tiêu, nét đứt đỏ cam
-    parent.pid_curve_target = pw.plot(empty, empty,
-        pen=pg.mkPen(color=ACCENT_WARN, width=2,
-                     style=Qt.DashLine), name="TARGET (setpoint)")
+    parent.pid_profile_curves = {}
+    for profile_id, color in enumerate(PROFILE_CURVE_COLORS):
+        key = f"p{profile_id}"
+        curve = pw.plot(
+            empty,
+            empty,
+            pen=pg.mkPen(color=color, width=2.2),
+            name=f"P{profile_id}",
+        )
+        parent.pid_profile_curves[profile_id] = curve
+        setattr(parent, f"pid_curve_{key}", curve)
 
     parent._pid_plot_widget = pw
     lay.addWidget(pw)
 
     btn_row = QHBoxLayout()
+    btn_row.setSpacing(8)
     ar = _text_btn("Auto range", TEXT_SEC, hover=ACCENT_CYAN)
     ar.clicked.connect(lambda: parent._pid_plot_widget.getViewBox().autoRange())
+    all_btn = _curve_toggle_btn("ALL OFF", ACCENT_CYAN, checked=True)
+    all_btn.clicked.connect(lambda: _toggle_all_pid_curves(parent))
     cl = _text_btn("Clear", TEXT_DIM, hover=ACCENT_ERR)
     cl.clicked.connect(lambda: _clear_pid_history(parent))
     btn_row.addWidget(ar)
+    btn_row.addWidget(all_btn)
+    curve_buttons = {}
+    for profile_id, color in enumerate(PROFILE_CURVE_COLORS):
+        key = f"p{profile_id}"
+        btn = _curve_toggle_btn(f"P{profile_id}", color, checked=True, min_width=44)
+        btn.clicked.connect(
+            lambda checked, k=key: _set_pid_curve_visible(parent, k, checked)
+        )
+        curve_buttons[key] = btn
+        btn_row.addWidget(btn)
     btn_row.addStretch()
     btn_row.addWidget(cl)
+    parent._pid_curve_all_btn = all_btn
+    parent._pid_curve_buttons = curve_buttons
     lay.addLayout(btn_row)
 
     grp.setLayout(lay)
@@ -674,23 +749,20 @@ def _build_response_box(parent) -> QGroupBox:
 def update_pid_display(parent):
     import global_var
     try:
-        # === PV ===
-        if hasattr(parent, "pid_curve_pv") and len(global_var.pid_pv_history) > 1:
+        if hasattr(parent, "pid_profile_curves"):
+            times_by_profile = getattr(global_var, "pid_profile_time_history", {})
+            pv_by_profile = getattr(global_var, "pid_profile_pv_history", {})
+            for profile_id, curve in parent.pid_profile_curves.items():
+                times = times_by_profile.get(profile_id, [])
+                values = pv_by_profile.get(profile_id, [])
+                curve.setData(np.array(times), np.array(values))
+        elif hasattr(parent, "pid_curve_pv") and len(global_var.pid_pv_history) > 1:
             parent.pid_curve_pv.setData(
                 np.array(global_var.pid_time_history),
                 np.array(global_var.pid_pv_history)
             )
 
-        # === TARGET - Vẽ bậc thang một lần ===
-        if hasattr(parent, "pid_curve_target") and global_var.pid_target_profile:
-            t_points = []
-            y_points = []
-            
-            for step in global_var.pid_target_profile:
-                t_points.extend([step["t0"], step["t1"] - 0.001])  # nhỏ để tạo bậc
-                y_points.extend([step["target"], step["target"]])
-            
-            parent.pid_curve_target.setData(np.array(t_points), np.array(y_points))
+        _refresh_pid_profile_table(parent)
 
         # Metric cards
         if hasattr(parent, "pid_card_pv"):
@@ -708,6 +780,24 @@ def update_pid_display(parent):
 
     except Exception as e:
         print("update_pid_display ERROR:", e)
+
+
+def _refresh_pid_profile_table(parent):
+    if not hasattr(parent, "pid_profile_table_items"):
+        return
+
+    import global_var
+    latest = getattr(global_var, "pid_profile_latest", {})
+    for profile_id, items in parent.pid_profile_table_items.items():
+        row = latest.get(
+            profile_id,
+            {"step": "NONE", "sp": 0.0, "pv": 0.0, "err": 0.0, "out": 0.0},
+        )
+        items["step"].setText(str(row.get("step", "NONE")))
+        items["sp"].setText(f"{row.get('sp', 0.0):+.2f}")
+        items["pv"].setText(f"{row.get('pv', 0.0):+.2f}")
+        items["err"].setText(f"{row.get('err', 0.0):+.2f}")
+        items["out"].setText(f"{row.get('out', 0.0):+.2f}")
 
 
 # def _clear_pid_history(parent):
@@ -737,13 +827,55 @@ def _clear_pid_history(parent):
 
     # Clear graph
     empty = np.array([], dtype=float)
+    profile_history_names = [
+        'pid_profile_time_history', 'pid_profile_pv_history',
+        'pid_profile_sp_history', 'pid_profile_err_history',
+        'pid_profile_out_history',
+    ]
+    for name in profile_history_names:
+        if hasattr(global_var, name):
+            setattr(global_var, name, {i: [] for i in range(8)})
+    if hasattr(global_var, 'pid_profile_latest'):
+        global_var.pid_profile_latest = {
+            i: {"step": "NONE", "sp": 0.0, "pv": 0.0, "err": 0.0, "out": 0.0}
+            for i in range(8)
+        }
+
+    if hasattr(parent, "pid_profile_curves"):
+        for curve in parent.pid_profile_curves.values():
+            curve.setData(empty, empty)
     if hasattr(parent, "pid_curve_pv"):
         parent.pid_curve_pv.setData(empty, empty)
-    if hasattr(parent, "pid_curve_target"):
-        parent.pid_curve_target.setData(empty, empty)
-
-
+    _refresh_pid_profile_table(parent)
 # ═══════════════════════════════════════════════════════════════════════════════
+def _set_pid_curve_visible(parent, curve_key: str, visible: bool):
+    curve = getattr(parent, f"pid_curve_{curve_key}", None)
+    if curve is not None:
+        curve.setVisible(visible)
+    _sync_pid_curve_controls(parent)
+
+
+def _toggle_all_pid_curves(parent):
+    buttons = getattr(parent, "_pid_curve_buttons", {})
+    show_all = not all(btn.isChecked() for btn in buttons.values())
+    for key, btn in buttons.items():
+        btn.setChecked(show_all)
+        curve = getattr(parent, f"pid_curve_{key}", None)
+        if curve is not None:
+            curve.setVisible(show_all)
+    _sync_pid_curve_controls(parent)
+
+
+def _sync_pid_curve_controls(parent):
+    buttons = getattr(parent, "_pid_curve_buttons", {})
+    all_btn = getattr(parent, "_pid_curve_all_btn", None)
+    if not buttons or all_btn is None:
+        return
+    all_visible = all(btn.isChecked() for btn in buttons.values())
+    all_btn.setChecked(all_visible)
+    all_btn.setText("ALL OFF" if all_visible else "ALL ON")
+
+
 # TARGET PROFILE BUILDER
 #
 # Cơ chế 2 bước:
@@ -1063,6 +1195,34 @@ def _grp(title: str) -> QGroupBox:
     return g
 
 
+def _pid_table_style():
+    return f"""
+        QTableWidget {{
+            background:{BG_CARD};
+            border:1.5px solid {BORDER};
+            border-radius:8px;
+            color:{TEXT_SEC};
+            gridline-color:{BORDER};
+            font-size:12px;
+            font-weight:700;
+        }}
+        QHeaderView::section {{
+            background:{BG_SURFACE};
+            border:none;
+            border-right:1px solid {BORDER};
+            border-bottom:1px solid {BORDER};
+            color:{ACCENT_CYAN};
+            font-size:12px;
+            font-weight:800;
+            padding:4px;
+        }}
+        QTableWidget::item {{
+            border:none;
+            padding:3px 6px;
+        }}
+    """
+
+
 def _action_btn(label, accent, h=34, w=None, bold=False):
     b = QPushButton(label)
     b.setFixedHeight(h)
@@ -1075,16 +1235,17 @@ def _action_btn(label, accent, h=34, w=None, bold=False):
     bg_hover = _rgba(accent, 0.34)
     bg_pressed = _rgba(accent, 0.14)
     bg_disabled = _rgba(accent, 0.08)
+    hover_border = TEXT_PRIM
     b.setStyleSheet(f"""
         QPushButton{{
             background-color:{bg};
             border:2px solid {accent};
-            border-radius:7px;color:#F8FBFF;
+            border-radius:7px;color:{TEXT_PRIM};
             font-size:13px;font-weight:{fw};letter-spacing:0.4px;
         }}
         QPushButton:hover{{
             background-color:{bg_hover};
-            border:2px solid #FFFFFF;
+            border:2px solid {hover_border};
         }}
         QPushButton:pressed{{
             background-color:{bg_pressed};
@@ -1110,13 +1271,46 @@ def _text_btn(label, color, hover):
     return b
 
 
+def _curve_toggle_btn(label, accent, checked=True, min_width=82):
+    b = QPushButton(label)
+    b.setCheckable(True)
+    b.setChecked(checked)
+    b.setFixedHeight(26)
+    b.setMinimumWidth(min_width)
+    bg_checked = _rgba(accent, 0.22)
+    bg_hover = _rgba(accent, 0.34)
+    bg_unchecked = _rgba(accent, 0.06)
+    b.setStyleSheet(f"""
+        QPushButton{{
+            background:{bg_unchecked};
+            border:1.5px solid {BORDER};
+            border-radius:5px;
+            color:{TEXT_DIM};
+            font-size:12px;
+            font-weight:700;
+            padding:2px 10px;
+        }}
+        QPushButton:checked{{
+            background:{bg_checked};
+            border-color:{accent};
+            color:{TEXT_PRIM};
+        }}
+        QPushButton:hover{{
+            background:{bg_hover};
+            border-color:{accent};
+            color:{TEXT_PRIM};
+        }}
+    """)
+    return b
+
+
 def _icon_btn(icon, accent):
     b = QPushButton(icon)
     b.setFixedSize(34, 34)
     b.setStyleSheet(f"""
         QPushButton{{background-color:{BG_CARD};border:1.5px solid {BORDER};
             border-radius:6px;color:{accent};font-size:16px;font-weight:800;}}
-        QPushButton:hover{{background-color:#1C2540;border-color:{accent};}}
+        QPushButton:hover{{background-color:{BG_SURFACE};border-color:{accent};}}
     """)
     return b
 

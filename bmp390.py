@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy
 
 from theme import get_theme
 
@@ -6,6 +6,8 @@ from theme import get_theme
 def create_on_board_condition_strip(parent):
     strip = QFrame()
     strip.setObjectName("onBoardCondition")
+    strip.setFixedHeight(38)
+    strip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     strip._condition_title = QLabel("ON BOARD CONDITION")
     strip._condition_title.setStyleSheet("background:transparent;")
 
@@ -21,6 +23,7 @@ def create_on_board_condition_strip(parent):
     layout.addWidget(strip._condition_title)
     layout.addWidget(parent.bmp390_temp_label)
     layout.addWidget(parent.bmp390_press_label)
+    layout.addStretch()
 
     apply_on_board_condition_theme(parent)
 

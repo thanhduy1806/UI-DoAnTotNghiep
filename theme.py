@@ -79,8 +79,17 @@ def toggle_theme():
     return _CURRENT_THEME
 
 
+def _rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
 def app_stylesheet():
     t = get_theme()
+    scrollbar_handle = _rgba(t["accent_cyan"], 0.22)
+    scrollbar_handle_hover = _rgba(t["accent_cyan"], 0.34)
+    scrollbar_handle_pressed = _rgba(t["accent_cyan"], 0.14)
     return f"""
 QWidget {{
     background-color: {t["bg_deep"]};
@@ -162,6 +171,76 @@ QPushButton:pressed {{
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
     selection-background-color: {t["accent_cyan"]};
     selection-color: {t["select_text"]};
+}}
+
+QScrollBar:vertical {{
+    background: {t["bg_surface"]};
+    border: 1.5px solid {t["border"]};
+    border-radius: 6px;
+    width: 14px;
+    margin: 0;
+}}
+
+QScrollBar::handle:vertical {{
+    background: {scrollbar_handle};
+    border: 1.5px solid {t["accent_cyan"]};
+    border-radius: 5px;
+    min-height: 28px;
+}}
+
+QScrollBar::handle:vertical:hover {{
+    background: {scrollbar_handle_hover};
+}}
+
+QScrollBar::handle:vertical:pressed {{
+    background: {scrollbar_handle_pressed};
+}}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {{
+    background: transparent;
+    border: none;
+    height: 0;
+}}
+
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {{
+    background: transparent;
+}}
+
+QScrollBar:horizontal {{
+    background: {t["bg_surface"]};
+    border: 1.5px solid {t["border"]};
+    border-radius: 6px;
+    height: 14px;
+    margin: 0;
+}}
+
+QScrollBar::handle:horizontal {{
+    background: {scrollbar_handle};
+    border: 1.5px solid {t["accent_cyan"]};
+    border-radius: 5px;
+    min-width: 28px;
+}}
+
+QScrollBar::handle:horizontal:hover {{
+    background: {scrollbar_handle_hover};
+}}
+
+QScrollBar::handle:horizontal:pressed {{
+    background: {scrollbar_handle_pressed};
+}}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {{
+    background: transparent;
+    border: none;
+    width: 0;
+}}
+
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {{
+    background: transparent;
 }}
 """
 

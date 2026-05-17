@@ -58,11 +58,6 @@ class CubeSatMonitor(QWidget):
         self.title_label = QLabel("MISSION CONTROL")
 
         top.addWidget(self.title_label)
-        top.addSpacing(24)
-
-        self.on_board_condition = create_on_board_condition_strip(self)
-        apply_on_board_condition_theme(self)
-        top.addWidget(self.on_board_condition)
         top.addStretch()
 
         self.theme_btn = QPushButton()
@@ -176,8 +171,8 @@ class CubeSatMonitor(QWidget):
             font-weight: bold;
         """)
 
-        mode = current_theme_name().upper()
-        self.theme_btn.setText(f"{mode} THEME")
+        next_mode = "LIGHT" if current_theme_name() == "dark" else "DARK"
+        self.theme_btn.setText(f"{next_mode} THEME")
         self.theme_btn.setStyleSheet(outline_button_style(t["accent_cyan"]))
         self.log_panel_btn.setStyleSheet(outline_button_style(t["accent_cyan"]))
 
@@ -242,9 +237,12 @@ class CubeSatMonitor(QWidget):
 
         box = QFrame()
         self.center_layout = QVBoxLayout(box)
+        self.center_layout.setSpacing(8)
 
+        self.on_board_condition = create_on_board_condition_strip(self)
         self.temp_ctrl_tab = create_temp_ctrl_tab(self)
 
+        self.center_layout.addWidget(self.on_board_condition)
         self.center_layout.addWidget(self.temp_ctrl_tab)
 
         return box
