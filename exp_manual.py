@@ -50,7 +50,8 @@
 from PyQt5.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout,
     QGridLayout, QPushButton, QLabel, QLineEdit,
-    QFrame, QSizePolicy
+    QFrame, QSizePolicy, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -72,8 +73,8 @@ TEXT_SEC    = "#B9C7DD"
 def create_manual_group_box(parent):
     group = QGroupBox("LASER CONTROL  —  MANUAL")
     outer = QVBoxLayout()
-    outer.setSpacing(10)
-    outer.setContentsMargins(10, 10, 10, 10)
+    outer.setSpacing(8)
+    outer.setContentsMargins(10, 8, 10, 10)
 
     # ── Power input row ───────────────────────────────────────────────────────
     power_row = QHBoxLayout()
@@ -82,7 +83,7 @@ def create_manual_group_box(parent):
 
     parent.manual_percent = QLineEdit()
     parent.manual_percent.setPlaceholderText("0 – 100")
-    parent.manual_percent.setFixedHeight(34)
+    parent.manual_percent.setFixedHeight(30)
     parent.manual_percent.setStyleSheet(f"""
         QLineEdit {{
             background: {BG_SURFACE};
@@ -105,16 +106,15 @@ def create_manual_group_box(parent):
 
     # ── Divider ───────────────────────────────────────────────────────────────
     parent.manual_divider = QFrame()
-    parent.manual_divider.setFrameShape(QFrame.HLine)
-    outer.addWidget(parent.manual_divider)
+    parent.manual_divider.setVisible(False)
 
     # ── Grid label ────────────────────────────────────────────────────────────
-    parent.manual_grid_label = QLabel("Select laser position  (1 – 24)")
-    outer.addWidget(parent.manual_grid_label)
+    parent.manual_grid_label = QLabel("")
+    parent.manual_grid_label.setVisible(False)
 
     # ── 4 × 6 grid  (24 lasers) ───────────────────────────────────────────────
     grid = QGridLayout()
-    grid.setSpacing(5)
+    grid.setSpacing(6)
 
     parent._laser_buttons = {}
 
@@ -150,6 +150,29 @@ def create_manual_group_box(parent):
 
 
 # ─── Custom button classes ────────────────────────────────────────────────────
+
+def create_laser_status_box(parent):
+    group = QGroupBox("LASER  READBACK")
+    lay = QVBoxLayout()
+    lay.setContentsMargins(8, 8, 8, 8)
+    lay.setSpacing(6)
+
+    table = QTableWidget(0, 4)
+    table.setHorizontalHeaderLabels(["Laser", "Photo", "Photo current", "Time"])
+    table.verticalHeader().setVisible(False)
+    table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    table.setSelectionMode(QAbstractItemView.NoSelection)
+    table.setFocusPolicy(Qt.NoFocus)
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    table.horizontalHeader().setFixedHeight(28)
+    table.verticalHeader().setDefaultSectionSize(26)
+
+    parent.laser_readback_table = table
+    lay.addWidget(table)
+    group.setLayout(lay)
+    apply_laser_status_theme(parent)
+    return group
+
 
 class _LaserButton(QPushButton):
     """Compact numbered laser button with active / inactive states."""
@@ -195,6 +218,9 @@ class _LaserButton(QPushButton):
 
     def __init__(self, index: int):
         super().__init__(str(index))
+        self._index = index
+        self._drive_current = None
+        self._photo_current = None
         self.setFixedSize(44, 42)
         self._active = False
         self.setStyleSheet(self._style_idle())
@@ -205,6 +231,17 @@ class _LaserButton(QPushButton):
 
     def toggle_active(self):
         self.set_active(not self._active)
+
+    def set_drive_current(self, value):
+        self._drive_current = value
+        self._refresh_text()
+
+    def set_photo_current(self, value):
+        self._photo_current = value
+        self._refresh_text()
+
+    def _refresh_text(self):
+        self.setText(str(self._index))
 
 
 class _ActionButton(QPushButton):
@@ -285,47 +322,167 @@ def apply_manual_theme(parent):
 
     parent.manual_all_on_btn.apply_theme()
     parent.manual_all_off_btn.apply_theme()
+    apply_laser_status_theme(parent)
+
+
+def apply_laser_status_theme(parent):
+    table = getattr(parent, "laser_readback_table", None)
+    if not table:
+        return
+    t = get_theme()
+    table.setStyleSheet(f"""
+        QTableWidget {{
+            background:{t["bg_card"]};
+            border:1.5px solid {t["border"]};
+            border-radius:7px;
+            color:{t["text_secondary"]};
+            gridline-color:{t["border"]};
+            font-size:11px;
+            font-weight:700;
+        }}
+        QHeaderView::section {{
+            background:{t["bg_surface"]};
+            border:none;
+            border-right:1px solid {t["border"]};
+            border-bottom:1px solid {t["border"]};
+            color:{t["accent_cyan"]};
+            font-size:11px;
+            font-weight:800;
+            padding:4px;
+        }}
+        QTableWidget::item {{
+            border:none;
+            padding:3px 5px;
+        }}
+    """)
+
+
+def _refresh_laser_status(parent, pos=None):
+    if pos is not None:
+        parent._manual_selected_laser_pos = pos
+
+
+def append_laser_readback(parent, pos: int, current, started_at: str = None):
+    table = getattr(parent, "laser_readback_table", None)
+    if table is None:
+        return
+
+    row = table.rowCount()
+    table.insertRow(row)
+    values = [
+        f"Laser {pos}",
+        f"Photo {pos}",
+        _format_current(current),
+        started_at or getattr(parent, "_manual_laser_started_at", "--"),
+    ]
+    for col, value in enumerate(values):
+        item = QTableWidgetItem(str(value))
+        item.setTextAlignment(Qt.AlignCenter)
+        table.setItem(row, col, item)
+    table.scrollToBottom()
+
+
+def update_photo_current(parent, pos: int, value):
+    """Update PHOTO readback for a laser/photo position."""
+    try:
+        import global_var
+        if not hasattr(global_var, "photo_current"):
+            global_var.photo_current = {i: None for i in range(1, 25)}
+        global_var.photo_current[pos] = value
+    except Exception:
+        pass
+
+    btn = getattr(parent, "_laser_buttons", {}).get(pos)
+    if btn:
+        btn.set_photo_current(value)
+    if getattr(parent, "_manual_selected_laser_pos", None) in (None, pos):
+        _refresh_laser_status(parent, pos)
+    append_laser_readback(
+        parent,
+        pos,
+        value,
+        getattr(parent, "_manual_laser_started_at", "--"),
+    )
+
+
+def finish_laser_experiment(parent):
+    pos = getattr(parent, "_manual_running_laser_pos", None)
+    btn = getattr(parent, "_laser_buttons", {}).get(pos)
+    if btn:
+        btn.set_active(False)
+    parent._manual_running_laser_pos = None
+
+
+def _set_laser_drive_current(parent, pos: int, value):
+    try:
+        import global_var
+        if not hasattr(global_var, "laser_drive_current"):
+            global_var.laser_drive_current = {i: None for i in range(1, 25)}
+        global_var.laser_drive_current[pos] = value
+    except Exception:
+        pass
+
+    btn = getattr(parent, "_laser_buttons", {}).get(pos)
+    if btn:
+        btn.set_drive_current(value)
+    if getattr(parent, "_manual_selected_laser_pos", None) in (None, pos):
+        _refresh_laser_status(parent, pos)
+
+
+def _format_current(value):
+    if value is None:
+        return "--"
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def laser_click(parent, pos: int):
-    """Toggle a single laser and send the CLI command over UART."""
+    """Start one laser experiment with the new exp_start_laser CLI."""
     btn = parent._laser_buttons.get(pos)
+    if btn and btn._active:
+        btn.set_active(False)
+        _set_laser_drive_current(parent, pos, 0)
+        return
+
+    power_value = _manual_power_value(parent.manual_percent.text())
+    parent._manual_running_laser_pos = pos
+    parent._manual_selected_laser_pos = pos
+    parent._manual_laser_started_at = _now_text()
+
     if btn:
-        btn.toggle_active()
-
-    is_on   = btn._active if btn else True
-
-    if is_on:
-        _send_laser_dac(parent)
-        _send_uart_command(parent, f"laser_int_sw_on {pos}")
-    else:
-        _send_uart_command(parent, f"laser_int_sw_off {pos}")
+        btn.set_active(True)
+    _set_laser_drive_current(parent, pos, power_value)
+    _send_uart_command(parent, f"exp_start_laser {pos} {power_value}")
 
 
 def fire_all(parent):
-    """Turn all 24 lasers ON."""
+    """Start all laser experiments with the selected power."""
+    power_value = _manual_power_value(parent.manual_percent.text())
+    parent._manual_all_drive = power_value
     for pos in range(1, 25):
         btn = parent._laser_buttons.get(pos)
         if btn:
             btn.set_active(True)
-    _send_laser_dac(parent)
-    for pos in range(1, 25):
-        _send_uart_command(parent, f"laser_int_sw_on {pos}")
+        parent._manual_running_laser_pos = pos
+        parent._manual_selected_laser_pos = pos
+        parent._manual_laser_started_at = _now_text()
+        _set_laser_drive_current(parent, pos, power_value)
+        _send_uart_command(parent, f"exp_start_laser {pos} {power_value}")
+    _refresh_laser_status(parent, "ALL")
 
 
 def off_all(parent):
-    """Turn all 24 lasers OFF."""
+    """Clear active highlights in the GUI only; firmware auto-stops experiments."""
     for pos in range(1, 25):
         btn = parent._laser_buttons.get(pos)
         if btn:
             btn.set_active(False)
-    for pos in range(1, 25):
-        _send_uart_command(parent, f"laser_int_sw_off {pos}")
-
-
-def _send_laser_dac(parent):
-    power_value = _manual_power_value(parent.manual_percent.text())
-    _send_uart_command(parent, f"laser_int_set_dac {power_value}")
+        _set_laser_drive_current(parent, pos, 0)
+    parent._manual_all_drive = 0
+    parent._manual_running_laser_pos = None
+    _refresh_laser_status(parent, "ALL")
 
 
 def _manual_power_value(text: str) -> int:
@@ -341,3 +498,8 @@ def _manual_power_value(text: str) -> int:
 def _send_uart_command(parent, cmd: str):
     if hasattr(parent, "uart") and parent.uart:
         parent.uart.send_command(cmd)
+
+
+def _now_text():
+    from datetime import datetime
+    return datetime.now().strftime("%H:%M:%S")

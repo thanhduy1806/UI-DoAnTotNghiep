@@ -49,6 +49,21 @@ _BMP390_CLI_RE = re.compile(
     re.IGNORECASE
 )
 
+_PHOTO_CURRENT_RE = re.compile(
+    r"(?:PHOTO|PD|PHOTODIODE)"
+    r"(?:\s*(?:POS|CH|CHANNEL|IDX|INDEX|#)?\s*[=:]?\s*)"
+    r"(\d{1,2})"
+    r".*?"
+    r"(?:I|CUR|CURRENT|ADC)?\s*[=:]?\s*"
+    r"([+-]?\d+(?:\.\d+)?)\s*(nA|uA|µA|mA|A)?",
+    re.IGNORECASE,
+)
+
+_EXP_DONE_CURRENT_RE = re.compile(
+    r"EXP\s+DONE!\s+Current:\s*([+-]?\d+(?:\.\d+)?)\s*(nA|uA|ÂµA|mA|A)?",
+    re.IGNORECASE,
+)
+
 MAX_HISTORY = 50000
 
 
@@ -58,6 +73,9 @@ MAX_HISTORY = 50000
 
 def _push_history():
     """Append PV, thời gian thực và giới hạn history"""
+    if not getattr(global_var, "pid_graph_session_active", False):
+        return
+
     if not hasattr(global_var, 'pid_start_time') or global_var.pid_start_time is None:
         global_var.pid_start_time = time.time()
 
@@ -110,6 +128,9 @@ def _ensure_profile_history():
 
 
 def _push_profile_history(profile_id, sp, pv, out, err):
+    if not getattr(global_var, "pid_graph_session_active", False):
+        return
+
     if not hasattr(global_var, 'pid_start_time') or global_var.pid_start_time is None:
         global_var.pid_start_time = time.time()
 
@@ -270,6 +291,48 @@ def parse_uart_line(line: str):
 
     except Exception as e:
         print("PID parse 2 error:", e)
+
+    # ====================== EXP LASER CURRENT FORMAT ======================
+    try:
+        m = _EXP_DONE_CURRENT_RE.search(line)
+        if m:
+            value = float(m.group(1))
+            unit = (m.group(2) or "A").replace("Âµ", "u")
+            if global_var.window:
+                pos = getattr(global_var.window, "_manual_running_laser_pos", None)
+                if pos is None:
+                    pos = getattr(global_var.window, "_manual_selected_laser_pos", None)
+                if isinstance(pos, int) and 1 <= pos <= 24:
+                    from exp_manual import update_photo_current
+                    display_value = f"{m.group(1)} {unit}" if unit else m.group(1)
+                    update_photo_current(global_var.window, pos, display_value)
+            return
+
+        if re.fullmatch(r"EXP\s+DONE!", line, re.IGNORECASE):
+            if global_var.window:
+                from exp_manual import finish_laser_experiment
+                finish_laser_experiment(global_var.window)
+            return
+    except Exception as e:
+        print("EXP laser parse error:", e)
+
+    # ====================== PHOTO CURRENT FORMAT ======================
+    try:
+        m = _PHOTO_CURRENT_RE.search(line)
+        if m:
+            pos = int(m.group(1))
+            if 1 <= pos <= 24:
+                value = float(m.group(2))
+                unit = (m.group(3) or "").replace("µ", "u")
+                if not hasattr(global_var, "photo_current"):
+                    global_var.photo_current = {i: None for i in range(1, 25)}
+                global_var.photo_current[pos] = f"{value:g}{unit}" if unit else value
+                if global_var.window:
+                    from exp_manual import update_photo_current
+                    update_photo_current(global_var.window, pos, global_var.photo_current[pos])
+            return
+    except Exception as e:
+        print("PHOTO parse error:", e)
 
     # ====================== SENSOR PARSERS ======================
     try:

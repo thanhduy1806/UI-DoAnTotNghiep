@@ -17,6 +17,7 @@ pid_out  = 0.0          # output PID (-100 … +100)
 pid_err  = 0.0          # error = PV - SP
 
 # History cho graph (tối đa 300 điểm)
+pid_graph_session_active = False
 pid_sp_history  = []
 pid_pv_history  = []
 pid_err_history = []
@@ -32,6 +33,9 @@ pid_profile_latest = {
     i: {"step": "NONE", "sp": 0.0, "pv": 0.0, "err": 0.0, "out": 0.0}
     for i in range(8)
 }
+
+laser_drive_current = {i: None for i in range(1, 25)}
+photo_current = {i: None for i in range(1, 25)}
 
 # Target profile lookup table (full pre-computed, revealed per sample)
 pid_target_lookup   = []   # toàn bộ profile tính sẵn khi nhấn START

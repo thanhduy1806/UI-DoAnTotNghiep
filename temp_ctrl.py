@@ -76,10 +76,71 @@ STEP_COLORS = {
 
 MAX_STEPS        = 8
 WIZARD_TIMEOUT_MS = 10000   # 10s timeout mỗi bước
+PID_TIME_WINDOW_SECONDS = 300
 PROFILE_CURVE_COLORS = [
     "#00E5B0", "#00C8E8", "#F59E0B", "#BD93F9",
     "#FF5C5C", "#60A5FA", "#A3E635", "#F472B6",
 ]
+PID_WHEEL_ZOOM_IN_FACTOR = 0.88
+PID_MIN_TIME_WINDOW_SECONDS = 1.0
+PID_MIN_TEMP_WINDOW = 0.05
+
+
+class _PidGraphViewBox(pg.ViewBox):
+    def __init__(self, ui_parent, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pid_ui_parent = ui_parent
+
+    def wheelEvent(self, ev, axis=None):
+        _wheel_zoom_pid_plot(self._pid_ui_parent, self, ev, zoom_x=True, zoom_y=True)
+
+    def mouseClickEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self._is_pid_plot_area_pos(ev.pos()):
+            _move_pid_measure_cursor(self._pid_ui_parent, self, ev.pos())
+            ev.accept()
+            return
+        super().mouseClickEvent(ev)
+
+    def mouseDragEvent(self, ev, axis=None):
+        if axis is None and ev.button() == Qt.LeftButton and self._is_pid_plot_area_pos(ev.pos()):
+            _move_pid_measure_cursor(self._pid_ui_parent, self, ev.pos())
+            ev.accept()
+            return
+        super().mouseDragEvent(ev, axis=axis)
+
+    def _is_pid_plot_area_pos(self, pos):
+        return self.boundingRect().contains(pos)
+
+
+class _PidGraphAxis(pg.AxisItem):
+    def __init__(self, orientation, ui_parent, *args, **kwargs):
+        super().__init__(orientation, *args, **kwargs)
+        self._pid_ui_parent = ui_parent
+
+    def wheelEvent(self, ev):
+        vb = self.linkedView()
+        if vb is None:
+            ev.ignore()
+            return
+        if self.orientation in ("bottom", "top"):
+            _wheel_zoom_pid_plot(self._pid_ui_parent, vb, ev, zoom_x=True, zoom_y=False)
+        elif self.orientation in ("left", "right"):
+            _wheel_zoom_pid_plot(self._pid_ui_parent, vb, ev, zoom_x=False, zoom_y=True)
+        else:
+            ev.ignore()
+
+
+class _PidMeasureLabel(pg.TextItem):
+    def __init__(self, ui_parent, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pid_ui_parent = ui_parent
+
+    def mouseClickEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            _hide_pid_measure_cursor(self._pid_ui_parent)
+            ev.accept()
+            return
+        ev.ignore()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -221,6 +282,8 @@ def create_temp_ctrl_tab(parent) -> QWidget:
         }
     if not hasattr(global_var, 'pid_start_time'):
         global_var.pid_start_time = None
+    if not hasattr(global_var, 'pid_graph_session_active'):
+        global_var.pid_graph_session_active = False
 
     root = QScrollArea()
     root.setWidgetResizable(True)
@@ -320,7 +383,13 @@ def _build_pid_graph(parent) -> QGroupBox:
     lay.setContentsMargins(8, 8, 8, 8)
 
     pg.setConfigOptions(antialias=True)
-    pw = pg.PlotWidget()
+    pw = pg.PlotWidget(
+        viewBox=_PidGraphViewBox(parent),
+        axisItems={
+            "left": _PidGraphAxis("left", parent),
+            "bottom": _PidGraphAxis("bottom", parent),
+        },
+    )
     pw.setBackground(BG_CARD)
     pw.setFixedHeight(430)
     pw.showGrid(x=True, y=True, alpha=0.18)
@@ -356,13 +425,34 @@ def _build_pid_graph(parent) -> QGroupBox:
         parent.pid_profile_curves[profile_id] = curve
         setattr(parent, f"pid_curve_{key}", curve)
 
+    measure_pen = pg.mkPen(color=ACCENT_CYAN, width=1, style=Qt.DashLine)
+    parent._pid_measure_x_line = pg.InfiniteLine(angle=90, movable=False, pen=measure_pen)
+    parent._pid_measure_y_line = pg.InfiniteLine(angle=0, movable=False, pen=measure_pen)
+    parent._pid_measure_label = _PidMeasureLabel(
+        parent,
+        color=TEXT_PRIM,
+        fill=pg.mkBrush(BG_SURFACE + "E8"),
+        border=pg.mkPen(color=BORDER),
+        anchor=(0, 1),
+    )
+    for item in (
+        parent._pid_measure_x_line,
+        parent._pid_measure_y_line,
+        parent._pid_measure_label,
+    ):
+        item.setZValue(20)
+        item.hide()
+        pw.addItem(item, ignoreBounds=True)
+
     parent._pid_plot_widget = pw
+    parent._pid_follow_latest = True
+    parent._pid_time_window_seconds = PID_TIME_WINDOW_SECONDS
     lay.addWidget(pw)
 
     btn_row = QHBoxLayout()
     btn_row.setSpacing(8)
     ar = _text_btn("Auto range", TEXT_SEC, hover=ACCENT_CYAN)
-    ar.clicked.connect(lambda: parent._pid_plot_widget.getViewBox().autoRange())
+    ar.clicked.connect(lambda: _auto_range_pid_plot(parent))
     all_btn = _curve_toggle_btn("ALL OFF", ACCENT_CYAN, checked=True)
     all_btn.clicked.connect(lambda: _toggle_all_pid_curves(parent))
     cl = _text_btn("Clear", TEXT_DIM, hover=ACCENT_ERR)
@@ -439,11 +529,11 @@ def _build_profile_wizard(parent) -> QGroupBox:
     _ps(0, 1, "Sec NTC",     "wiz_sec_ntc",   0, 7, 1, "0=NTC1…7=NTC8")
 
     pg.addWidget(_lbl("TEC mask"), 1, 0)
-    parent.wiz_tec_mask = _lineedit("0x01", tip="e.g. 0x01 = TEC1 on", w=80)
+    parent.wiz_tec_mask = _spinbox(0, 255, 1, tip="Decimal mask, e.g. 1 = TEC1 on", w=80)
     pg.addWidget(parent.wiz_tec_mask, 1, 1)
 
     pg.addWidget(_lbl("Heater mask"), 1, 2)
-    parent.wiz_heater_mask = _lineedit("0x02", tip="e.g. 0x02 = Heater2 on", w=80)
+    parent.wiz_heater_mask = _spinbox(0, 255, 2, tip="Decimal mask, e.g. 2 = Heater2 on", w=80)
     pg.addWidget(parent.wiz_heater_mask, 1, 3)
 
     pg.addWidget(_lbl("Setpoint °C"), 2, 0)
@@ -756,11 +846,13 @@ def update_pid_display(parent):
                 times = times_by_profile.get(profile_id, [])
                 values = pv_by_profile.get(profile_id, [])
                 curve.setData(np.array(times), np.array(values))
+            _scroll_pid_plot_to_latest(parent)
         elif hasattr(parent, "pid_curve_pv") and len(global_var.pid_pv_history) > 1:
             parent.pid_curve_pv.setData(
                 np.array(global_var.pid_time_history),
                 np.array(global_var.pid_pv_history)
             )
+            _scroll_pid_plot_to_latest(parent)
 
         _refresh_pid_profile_table(parent)
 
@@ -780,6 +872,167 @@ def update_pid_display(parent):
 
     except Exception as e:
         print("update_pid_display ERROR:", e)
+
+
+def _auto_range_pid_plot(parent):
+    if hasattr(parent, "_pid_plot_widget"):
+        parent._pid_plot_widget.getViewBox().autoRange()
+        x_range, _ = parent._pid_plot_widget.getViewBox().viewRange()
+        parent._pid_time_window_seconds = max(
+            PID_MIN_TIME_WINDOW_SECONDS,
+            x_range[1] - x_range[0],
+        )
+    parent._pid_follow_latest = True
+
+
+def _pid_wheel_delta(ev):
+    if hasattr(ev, "delta"):
+        return ev.delta()
+    if hasattr(ev, "angleDelta"):
+        return ev.angleDelta().y()
+    return 0
+
+
+def _move_pid_measure_cursor(parent, view_box, pos):
+    if not hasattr(parent, "_pid_measure_x_line"):
+        return
+
+    snap_point = _nearest_pid_curve_point(parent, view_box, pos)
+    if snap_point is None:
+        return
+
+    x_value, y_value = snap_point
+    parent._pid_measure_x_line.setPos(x_value)
+    parent._pid_measure_y_line.setPos(y_value)
+    parent._pid_measure_label.setText(f"Time: {x_value:.2f} s\nTemp: {y_value:.2f} C")
+    parent._pid_measure_label.setPos(x_value, y_value)
+    parent._pid_measure_x_line.show()
+    parent._pid_measure_y_line.show()
+    parent._pid_measure_label.show()
+
+
+def _nearest_pid_curve_point(parent, view_box, pos):
+    mouse_point = view_box.mapToView(pos)
+    x_range, y_range = view_box.viewRange()
+    x_span = max(abs(x_range[1] - x_range[0]), PID_MIN_TIME_WINDOW_SECONDS)
+    y_span = max(abs(y_range[1] - y_range[0]), PID_MIN_TEMP_WINDOW)
+    view_rect = view_box.boundingRect()
+    x_pixels = max(view_rect.width(), 1.0)
+    y_pixels = max(view_rect.height(), 1.0)
+    nearest = None
+    nearest_distance = None
+
+    curves = list(getattr(parent, "pid_profile_curves", {}).values())
+    fallback_curve = getattr(parent, "pid_curve_pv", None)
+    if not curves and fallback_curve is not None:
+        curves.append(fallback_curve)
+
+    for curve in curves:
+        if not curve.isVisible():
+            continue
+
+        x_data, y_data = curve.getData()
+        if x_data is None or y_data is None or len(x_data) == 0 or len(y_data) == 0:
+            continue
+
+        x_values = np.asarray(x_data, dtype=float)
+        y_values = np.asarray(y_data, dtype=float)
+        finite = np.isfinite(x_values) & np.isfinite(y_values)
+        if not finite.any():
+            continue
+
+        x_values = x_values[finite]
+        y_values = y_values[finite]
+        dx = (x_values - mouse_point.x()) * x_pixels / x_span
+        dy = (y_values - mouse_point.y()) * y_pixels / y_span
+        distances = dx * dx + dy * dy
+        index = int(np.argmin(distances))
+        distance = distances[index]
+        if nearest_distance is None or distance < nearest_distance:
+            nearest = (float(x_values[index]), float(y_values[index]))
+            nearest_distance = distance
+
+    return nearest
+
+
+def _hide_pid_measure_cursor(parent):
+    for name in (
+        "_pid_measure_x_line",
+        "_pid_measure_y_line",
+        "_pid_measure_label",
+    ):
+        item = getattr(parent, name, None)
+        if item is not None:
+            item.hide()
+
+
+def _wheel_zoom_pid_plot(parent, view_box, ev, zoom_x=True, zoom_y=True):
+    delta = _pid_wheel_delta(ev)
+    if delta == 0:
+        ev.ignore()
+        return
+
+    factor = PID_WHEEL_ZOOM_IN_FACTOR if delta > 0 else 1.0 / PID_WHEEL_ZOOM_IN_FACTOR
+    try:
+        mouse_point = view_box.mapSceneToView(ev.scenePos())
+    except Exception:
+        x_range, y_range = view_box.viewRange()
+        mouse_point = pg.Point(
+            (x_range[0] + x_range[1]) / 2.0,
+            (y_range[0] + y_range[1]) / 2.0,
+        )
+
+    x_range, y_range = view_box.viewRange()
+
+    if zoom_x:
+        left = mouse_point.x() - (mouse_point.x() - x_range[0]) * factor
+        right = mouse_point.x() + (x_range[1] - mouse_point.x()) * factor
+        if right - left < PID_MIN_TIME_WINDOW_SECONDS:
+            half = PID_MIN_TIME_WINDOW_SECONDS / 2.0
+            left = mouse_point.x() - half
+            right = mouse_point.x() + half
+        view_box.setXRange(left, right, padding=0)
+        parent._pid_time_window_seconds = max(PID_MIN_TIME_WINDOW_SECONDS, right - left)
+
+    if zoom_y:
+        bottom = mouse_point.y() - (mouse_point.y() - y_range[0]) * factor
+        top = mouse_point.y() + (y_range[1] - mouse_point.y()) * factor
+        if top - bottom < PID_MIN_TEMP_WINDOW:
+            half = PID_MIN_TEMP_WINDOW / 2.0
+            bottom = mouse_point.y() - half
+            top = mouse_point.y() + half
+        view_box.setYRange(bottom, top, padding=0)
+
+    parent._pid_follow_latest = True
+    ev.accept()
+
+
+def _scroll_pid_plot_to_latest(parent):
+    if not getattr(parent, "_pid_follow_latest", True):
+        return
+    if not hasattr(parent, "_pid_plot_widget"):
+        return
+
+    import global_var
+    latest = None
+    for times in getattr(global_var, "pid_profile_time_history", {}).values():
+        if times:
+            latest = max(latest or 0.0, times[-1])
+    fallback_times = getattr(global_var, "pid_time_history", [])
+    if fallback_times:
+        latest = max(latest or 0.0, fallback_times[-1])
+    if latest is None:
+        return
+
+    window = getattr(parent, "_pid_time_window_seconds", PID_TIME_WINDOW_SECONDS)
+    window = max(PID_MIN_TIME_WINDOW_SECONDS, window)
+    if latest <= window:
+        left = 0
+        right = max(window, latest + 5)
+    else:
+        right = latest + 5
+        left = right - window
+    parent._pid_plot_widget.setXRange(left, right, padding=0)
 
 
 def _refresh_pid_profile_table(parent):
@@ -846,6 +1099,10 @@ def _clear_pid_history(parent):
             curve.setData(empty, empty)
     if hasattr(parent, "pid_curve_pv"):
         parent.pid_curve_pv.setData(empty, empty)
+    if hasattr(parent, "_pid_plot_widget"):
+        parent._pid_time_window_seconds = PID_TIME_WINDOW_SECONDS
+        parent._pid_follow_latest = True
+        parent._pid_plot_widget.setXRange(0, PID_TIME_WINDOW_SECONDS, padding=0)
     _refresh_pid_profile_table(parent)
 # ═══════════════════════════════════════════════════════════════════════════════
 def _set_pid_curve_visible(parent, curve_key: str, visible: bool):
@@ -954,8 +1211,8 @@ def _build_wizard_seq(parent) -> list:
     seq.append(str(pid))                     # profile index
     seq.append(str(parent.wiz_main_ntc.value()))
     seq.append(str(parent.wiz_sec_ntc.value()))
-    seq.append(parent.wiz_tec_mask.text().strip()    or "1")
-    seq.append(parent.wiz_heater_mask.text().strip() or "2")
+    seq.append(str(parent.wiz_tec_mask.value()))
+    seq.append(str(parent.wiz_heater_mask.value()))
     seq.append(str(int(round(parent.wiz_setpoint.value() * 100))))
     seq.append(str(int(round(parent.wiz_delta.value()    * 100))))
     seq.append(str(n_step))
@@ -1045,7 +1302,13 @@ def _cmd_pid_set(parent):
 
 
 def _cmd_auto_ena(parent):
+    import global_var
     pid = parent.tc_run_profile_id.value()
+
+    _clear_pid_history(parent)
+    global_var.pid_graph_session_active = True
+    global_var.pid_start_time = time.time()
+
     _send(parent, f"temp_auto_ena {pid}")
     _log_resp(parent, f"[UI] Auto ENA → profile {pid}")
 
@@ -1057,12 +1320,8 @@ def _cmd_auto_ena(parent):
 #     _log_resp(parent, f"[UI] Auto START → profile {pid}")
 
 def _cmd_auto_start(parent):
-    import global_var
     pid = parent.tc_run_profile_id.value()
 
-    _clear_pid_history(parent)        # Clear trước khi bắt đầu
-
-    global_var.pid_start_time = time.time()
     build_target_profile(parent)
 
     _send(parent, f"temp_auto_start {pid}")
@@ -1070,7 +1329,9 @@ def _cmd_auto_start(parent):
 
 
 def _cmd_manu(parent):
+    import global_var
     pid = parent.tc_run_profile_id.value()
+    global_var.pid_graph_session_active = False
     _send(parent, f"temp_manu {pid}")
     _log_resp(parent, f"[UI] Manual → profile {pid}")
 

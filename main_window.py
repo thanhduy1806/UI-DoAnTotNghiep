@@ -29,6 +29,7 @@ from temp_ctrl import (
 
 from exp_manual import create_manual_group_box
 from exp_manual import apply_manual_theme
+from exp_manual import create_laser_status_box
 from exp_auto import create_auto_group_box
 
 
@@ -255,6 +256,7 @@ class CubeSatMonitor(QWidget):
 
         box = QFrame()
         lay = QVBoxLayout(box)
+        lay.setSpacing(8)
 
         self.tabs = QTabWidget()
 
@@ -264,11 +266,14 @@ class CubeSatMonitor(QWidget):
         self.tabs.addTab(self.manual_box, "Manual")
         self.tabs.addTab(self.auto_box,   "Auto")
 
-        lay.addWidget(self.tabs)
+        lay.addWidget(self.tabs, stretch=0)
+
+        self.laser_status_box = create_laser_status_box(self)
+        lay.addWidget(self.laser_status_box, stretch=1)
 
         self.uart_box = create_uart_group_box(self)
 
-        lay.addWidget(self.uart_box)
+        lay.addWidget(self.uart_box, stretch=0)
 
         return box
 
