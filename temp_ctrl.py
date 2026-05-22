@@ -787,7 +787,7 @@ def _build_run_section(parent) -> QGroupBox:
 
     r2 = QHBoxLayout()
     r2.setSpacing(8)
-    mn = _action_btn("MANUAL",     ACCENT_WARN)
+    mn = _action_btn("STOP",       ACCENT_WARN)
     lg = _action_btn("TOGGLE LOG", ACCENT_PRP)
     mn.setToolTip("temp_manu <id>")
     lg.setToolTip("c — toggle NTC log")
