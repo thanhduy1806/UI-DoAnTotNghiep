@@ -2,9 +2,9 @@ from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout,
     QTextEdit, QTabWidget,
     QGridLayout, QFrame, QLabel, QPushButton,
-    QSizePolicy
+    QSizePolicy, QSplitter, QLineEdit
 )
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer, Qt
 
 import pyqtgraph as pg
 
@@ -30,7 +30,6 @@ from temp_ctrl import (
 
 from exp_manual import create_manual_group_box
 from exp_manual import apply_manual_theme
-from exp_manual import create_laser_status_box
 from exp_auto import create_auto_group_box
 
 
@@ -107,23 +106,23 @@ class CubeSatMonitor(QWidget):
     # SAFE LOG APPEND
     # ═══════════════════════════════════════════════════════
 
-    def _append_log(self, text):
+    def _append_log_to_box(self, box, text):
 
         try:
 
-            if not hasattr(self, "log_box"):
+            if box is None:
                 return
 
-            self.log_box.append(text)
+            box.append(text)
 
             # chỉ giữ 200 dòng gần nhất
-            doc = self.log_box.document()
+            doc = box.document()
 
             MAX_LINES = 200
 
             while doc.blockCount() > MAX_LINES:
 
-                cursor = self.log_box.textCursor()
+                cursor = box.textCursor()
 
                 cursor.movePosition(cursor.Start)
                 cursor.select(cursor.LineUnderCursor)
@@ -137,6 +136,21 @@ class CubeSatMonitor(QWidget):
     # ═══════════════════════════════════════════════════════
     # SAFE PID UPDATE
     # ═══════════════════════════════════════════════════════
+
+    def _append_log(self, text):
+        self._append_ttys2_log(text)
+
+    def _append_ttys2_log(self, text):
+        self._append_log_to_box(
+            getattr(self, "log_box_ttys2", None),
+            text,
+        )
+
+    def _append_ttys5_log(self, text):
+        self._append_log_to_box(
+            getattr(self, "log_box_ttys5", None),
+            text,
+        )
 
     def _safe_pid_update(self):
 
@@ -177,6 +191,49 @@ class CubeSatMonitor(QWidget):
         self.theme_btn.setText(f"{next_mode} THEME")
         self.theme_btn.setStyleSheet(outline_button_style(t["accent_cyan"]))
         self.log_panel_btn.setStyleSheet(outline_button_style(t["accent_cyan"]))
+
+        for label in getattr(self, "_log_title_labels", []):
+            label.setStyleSheet(
+                f"color:{t['accent_cyan']};font-size:13px;font-weight:800;"
+                "padding:2px 0;background:transparent;"
+            )
+        console_input_style = f"""
+            QLineEdit {{
+                background-color:{t["bg_surface"]};
+                border:1.5px solid {t["border"]};
+                border-radius:6px;
+                color:{t["log_text"]};
+                font-family:Consolas;
+                font-size:12px;
+                font-weight:600;
+                padding:1px 8px;
+            }}
+            QLineEdit:focus {{
+                border-color:{t["accent_cyan"]};
+            }}
+        """
+        for command_input in getattr(self, "_console_inputs", {}).values():
+            command_input.setStyleSheet(console_input_style)
+        console_send_style = f"""
+            QPushButton {{
+                background-color:{t["bg_surface"]};
+                border:1.5px solid {t["accent_cyan"]};
+                border-radius:6px;
+                color:{t["accent_cyan"]};
+                font-size:12px;
+                font-weight:800;
+                padding:1px 8px;
+            }}
+            QPushButton:hover {{
+                background-color:{t["hover_surface"]};
+            }}
+            QPushButton:pressed {{
+                background-color:{t["button_pressed"]};
+            }}
+        """
+        for send_btn in getattr(self, "_console_send_buttons", {}).values():
+            send_btn.setStyleSheet(console_send_style)
+            send_btn.setFixedSize(56, 24)
 
         apply_on_board_condition_theme(self)
         apply_uart_theme(self)
@@ -223,17 +280,119 @@ class CubeSatMonitor(QWidget):
 
         box = QFrame()
         lay = QVBoxLayout(box)
+        lay.setSpacing(8)
+        lay.setContentsMargins(0, 0, 0, 0)
 
-        self.log_box = QTextEdit()
-        self.log_box.setReadOnly(True)
+        self._log_title_labels = []
+        self._console_inputs = {}
+        self._console_send_buttons = {}
+        splitter = QSplitter(Qt.Vertical)
 
-        lay.addWidget(self.log_box)
+        tty2_frame, self.log_box_ttys2 = self._build_log_view(
+            "MCU",
+            command_target="ttyS2",
+        )
+        tty5_frame, self.log_box_ttys5 = self._build_log_view(
+            "MPU",
+            command_target="ttyS5",
+        )
+
+        self.log_box = self.log_box_ttys2
+
+        splitter.addWidget(tty2_frame)
+        splitter.addWidget(tty5_frame)
+        splitter.setSizes([450, 450])
+
+        lay.addWidget(splitter)
 
         return box
 
     # ═══════════════════════════════════════════════════════
     # CENTER
     # ═══════════════════════════════════════════════════════
+
+    def _build_log_view(self, title, command_target=None):
+        frame = QFrame()
+        lay = QVBoxLayout(frame)
+        lay.setSpacing(4)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        label = QLabel(title)
+        self._log_title_labels.append(label)
+
+        log_box = QTextEdit()
+        log_box.setReadOnly(True)
+
+        lay.addWidget(label)
+        lay.addWidget(log_box)
+
+        if command_target:
+            row = QHBoxLayout()
+            row.setSpacing(5)
+            row.setContentsMargins(0, 0, 0, 0)
+
+            command_input = QLineEdit()
+            display_target = {"ttyS2": "MCU", "ttyS5": "MPU"}.get(
+                command_target,
+                command_target,
+            )
+            command_input.setPlaceholderText(f"command {display_target}")
+            command_input.setFixedHeight(24)
+            command_input.returnPressed.connect(
+                lambda target=command_target: self._send_console_command(target)
+            )
+
+            send_btn = QPushButton("Send")
+            send_btn.setFixedHeight(24)
+            send_btn.setFixedWidth(56)
+            send_btn.clicked.connect(
+                lambda _, target=command_target: self._send_console_command(target)
+            )
+
+            self._console_inputs[command_target] = command_input
+            self._console_send_buttons[command_target] = send_btn
+
+            if command_target == "ttyS2":
+                self.ttys2_input = command_input
+                self.ttys2_send_btn = send_btn
+            elif command_target == "ttyS5":
+                self.ttys5_input = command_input
+                self.ttys5_send_btn = send_btn
+
+            row.addWidget(command_input)
+            row.addWidget(send_btn)
+            lay.addLayout(row)
+
+        return frame, log_box
+
+    def _send_console_command(self, target):
+        command_input = getattr(self, "_console_inputs", {}).get(target)
+        if command_input is None:
+            return
+
+        cmd = command_input.text()
+        if not cmd:
+            return
+
+        if not hasattr(self, "uart") or not self.uart:
+            self._append_console_error(target, "Not connected")
+            return
+
+        if target == "ttyS2":
+            self.uart.send_command(cmd)
+            command_input.clear()
+        elif target == "ttyS5" and hasattr(self.uart, "send_ttys5_command"):
+            self.uart.send_ttys5_command(cmd)
+            command_input.clear()
+        else:
+            self._append_console_error(target, "Not available")
+
+    def _append_console_error(self, target, message):
+        text = f"[{target} TX ERROR] {message}"
+        if target == "ttyS5":
+            self._append_ttys5_log(text)
+        else:
+            self._append_ttys2_log(text)
 
     def _build_center(self):
 
@@ -270,9 +429,6 @@ class CubeSatMonitor(QWidget):
         self.tabs.setMinimumHeight(self.tabs.sizeHint().height())
 
         lay.addWidget(self.tabs, stretch=0)
-
-        self.laser_status_box = create_laser_status_box(self)
-        lay.addWidget(self.laser_status_box, stretch=1)
 
         self.uart_box = create_uart_group_box(self)
 

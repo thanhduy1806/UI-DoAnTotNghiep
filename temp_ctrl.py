@@ -14,6 +14,7 @@ from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal
 import pyqtgraph as pg
 import numpy as np
 import time
+import re
 from theme import get_theme
 
 # ─── Palette (sáng hơn, dễ đọc) ──────────────────────────────────────────────
@@ -515,16 +516,28 @@ def _build_profile_wizard(parent) -> QGroupBox:
 
     db = _action_btn("Display", ACCENT_CYAN, h=28)
     db.setToolTip("temp_profile_diplay <id>")
-    db.clicked.connect(lambda: _send(
-        parent, f"temp_profile_diplay {parent.wiz_profile_id.value()}"
-    ))
+    db.clicked.connect(lambda: _cmd_display_profile(parent))
     vb = _action_btn("Validate", ACCENT_WARN, h=28)
     vb.setToolTip("temp_profile_val")
     vb.clicked.connect(lambda: _send(parent, "temp_profile_val"))
 
-    hdr.addWidget(db)
-    hdr.addWidget(vb)
-    hdr.addStretch()
+    send_btn = _action_btn("SEND PROFILE", ACCENT_TEAL, h=28, bold=True)
+    send_btn.setToolTip(
+        "Gửi wizard tự động — chờ từng prompt firmware\n"
+        "Mode (HEAT/COOL/SOAK) do firmware tự quyết định"
+    )
+    send_btn.clicked.connect(lambda: _cmd_send_wizard(parent))
+    parent._wiz_send_btn = send_btn
+
+    cancel_btn = _action_btn("CANCEL", ACCENT_ERR, h=28, w=90)
+    cancel_btn.setVisible(False)
+    cancel_btn.clicked.connect(lambda: _cmd_cancel_wizard(parent))
+    parent._wiz_cancel_btn = cancel_btn
+
+    hdr.addWidget(db, stretch=1)
+    hdr.addWidget(vb, stretch=1)
+    hdr.addWidget(send_btn, stretch=1)
+    hdr.addWidget(cancel_btn)
     outer.addLayout(hdr)
     outer.addWidget(_hline())
 
@@ -596,7 +609,11 @@ def _build_profile_wizard(parent) -> QGroupBox:
 
     outer.addLayout(parent._wiz_step_container)
     _refresh_step_rows(parent)
+    _init_wizard_profile_state(parent)
     outer.addWidget(_hline())
+
+    parent.profile_display_table = _build_profile_display_table()
+    outer.addWidget(parent.profile_display_table)
 
     # ── Status ────────────────────────────────────────────────────────────────
     parent.wiz_status_lbl = QLabel("Idle")
@@ -606,45 +623,8 @@ def _build_profile_wizard(parent) -> QGroupBox:
     )
     outer.addWidget(parent.wiz_status_lbl)
 
-    # ── Send / Cancel ─────────────────────────────────────────────────────────
-    bc = QHBoxLayout()
-    bc.setSpacing(8)
-
-    send_btn = _action_btn("SEND PROFILE", ACCENT_TEAL, h=38, bold=True)
-    send_btn.setToolTip(
-        "Gửi wizard tự động — chờ từng prompt firmware\n"
-        "Mode (HEAT/COOL/SOAK) do firmware tự quyết định"
-    )
-    send_btn.clicked.connect(lambda: _cmd_send_wizard(parent))
-    parent._wiz_send_btn = send_btn
-
-    cancel_btn = _action_btn("CANCEL", ACCENT_ERR, h=38, w=100)
-    cancel_btn.setVisible(False)
-    cancel_btn.clicked.connect(lambda: _cmd_cancel_wizard(parent))
-    parent._wiz_cancel_btn = cancel_btn
-
-    bc.addWidget(send_btn)
-    bc.addWidget(cancel_btn)
-    outer.addLayout(bc)
-
-    # ── Manual ────────────────────────────────────────────────────────────────
-    mr = QHBoxLayout()
-    mr.setSpacing(6)
-    mr.addWidget(_lbl("Manual:"))
-    parent.tc_wizard_input = QLineEdit()
-    parent.tc_wizard_input.setPlaceholderText("Y / N / value — nhấn Enter để gửi")
-    parent.tc_wizard_input.setFixedHeight(30)
-    parent.tc_wizard_input.setStyleSheet(_input_style())
-    parent.tc_wizard_input.returnPressed.connect(lambda: _cmd_wizard_send(parent))
-    ib = _icon_btn("↵", ACCENT_CYAN)
-    ib.clicked.connect(lambda: _cmd_wizard_send(parent))
-    mr.addWidget(parent.tc_wizard_input)
-    mr.addWidget(ib)
-    outer.addLayout(mr)
-
     grp.setLayout(outer)
     return grp
-
 
 def _make_step_row(index: int):
     """
@@ -720,6 +700,142 @@ def _refresh_step_rows(parent):
         item = lay.itemAt(i)
         if item and item.widget():
             item.widget().setVisible(i < n)
+
+
+def _build_profile_display_table():
+    table = QTableWidget(0, 8)
+    table.setHorizontalHeaderLabels([
+        "ID", "Main", "Sec", "TEC", "Heater", "SP °C", "Delta °C", "Steps"
+    ])
+    table.verticalHeader().setVisible(False)
+    table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    table.setSelectionMode(QAbstractItemView.NoSelection)
+    table.setFocusPolicy(Qt.NoFocus)
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    table.horizontalHeader().setFixedHeight(24)
+    table.verticalHeader().setDefaultSectionSize(24)
+    table.setFixedHeight(76)
+    table.setStyleSheet(_pid_table_style())
+    return table
+
+
+def _default_wizard_profile_snapshot():
+    return {
+        "main_ntc": 0,
+        "sec_ntc": 1,
+        "tec_mask": 1,
+        "heater_mask": 2,
+        "setpoint": 25.0,
+        "delta": 0.0,
+        "step_count": 3,
+        "steps": [
+            {"start": 25.0, "stop": 40.0, "duration": 60}
+            for _ in range(MAX_STEPS)
+        ],
+    }
+
+
+def _ensure_wizard_profile_cache(parent):
+    if not hasattr(parent, "_wiz_profile_cache"):
+        parent._wiz_profile_cache = {
+            pid: _default_wizard_profile_snapshot()
+            for pid in range(8)
+        }
+    return parent._wiz_profile_cache
+
+
+def _read_wizard_profile_form(parent):
+    steps = []
+    for start_w, stop_w, dur_w, _ in parent._wiz_steps:
+        steps.append({
+            "start": float(start_w.value()),
+            "stop": float(stop_w.value()),
+            "duration": int(dur_w.value()),
+        })
+    return {
+        "main_ntc": int(parent.wiz_main_ntc.value()),
+        "sec_ntc": int(parent.wiz_sec_ntc.value()),
+        "tec_mask": int(parent.wiz_tec_mask.value()),
+        "heater_mask": int(parent.wiz_heater_mask.value()),
+        "setpoint": float(parent.wiz_setpoint.value()),
+        "delta": float(parent.wiz_delta.value()),
+        "step_count": int(parent.wiz_step_count.value()),
+        "steps": steps,
+    }
+
+
+def _save_current_wizard_profile(parent):
+    if getattr(parent, "_wiz_loading_profile", False):
+        return
+    cache = _ensure_wizard_profile_cache(parent)
+    pid = getattr(parent, "_wiz_current_profile_id", parent.wiz_profile_id.value())
+    cache[int(pid)] = _read_wizard_profile_form(parent)
+
+
+def _apply_wizard_profile_snapshot(parent, snapshot):
+    parent._wiz_loading_profile = True
+    try:
+        parent.wiz_main_ntc.setValue(int(snapshot.get("main_ntc", 0)))
+        parent.wiz_sec_ntc.setValue(int(snapshot.get("sec_ntc", 1)))
+        parent.wiz_tec_mask.setValue(int(snapshot.get("tec_mask", 1)))
+        parent.wiz_heater_mask.setValue(int(snapshot.get("heater_mask", 2)))
+        parent.wiz_setpoint.setValue(float(snapshot.get("setpoint", 25.0)))
+        parent.wiz_delta.setValue(float(snapshot.get("delta", 0.0)))
+        parent.wiz_step_count.setValue(int(snapshot.get("step_count", 3)))
+
+        steps = snapshot.get("steps", [])
+        for i, widgets in enumerate(parent._wiz_steps):
+            if i >= len(steps):
+                break
+            start_w, stop_w, dur_w, _ = widgets
+            step = steps[i]
+            start_w.setValue(float(step.get("start", 25.0)))
+            stop_w.setValue(float(step.get("stop", 40.0)))
+            dur_w.setValue(int(step.get("duration", 60)))
+
+        _refresh_step_rows(parent)
+    finally:
+        parent._wiz_loading_profile = False
+
+
+def _on_wizard_profile_id_changed(parent, new_id):
+    if getattr(parent, "_wiz_loading_profile", False):
+        return
+    cache = _ensure_wizard_profile_cache(parent)
+    old_id = getattr(parent, "_wiz_current_profile_id", None)
+    if old_id is not None and int(old_id) != int(new_id):
+        cache[int(old_id)] = _read_wizard_profile_form(parent)
+
+    parent._wiz_current_profile_id = int(new_id)
+    snapshot = cache.get(int(new_id), _default_wizard_profile_snapshot())
+    _apply_wizard_profile_snapshot(parent, snapshot)
+
+
+def _init_wizard_profile_state(parent):
+    parent._wiz_loading_profile = False
+    parent._wiz_current_profile_id = int(parent.wiz_profile_id.value())
+    cache = _ensure_wizard_profile_cache(parent)
+    cache[parent._wiz_current_profile_id] = _read_wizard_profile_form(parent)
+
+    for widget in (
+        parent.wiz_main_ntc,
+        parent.wiz_sec_ntc,
+        parent.wiz_tec_mask,
+        parent.wiz_heater_mask,
+        parent.wiz_setpoint,
+        parent.wiz_delta,
+        parent.wiz_step_count,
+    ):
+        widget.valueChanged.connect(lambda *_: _save_current_wizard_profile(parent))
+
+    for start_w, stop_w, dur_w, _ in parent._wiz_steps:
+        start_w.valueChanged.connect(lambda *_: _save_current_wizard_profile(parent))
+        stop_w.valueChanged.connect(lambda *_: _save_current_wizard_profile(parent))
+        dur_w.valueChanged.connect(lambda *_: _save_current_wizard_profile(parent))
+
+    parent.wiz_profile_id.valueChanged.connect(
+        lambda v: _on_wizard_profile_id_changed(parent, v)
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1318,6 +1434,14 @@ def _build_wizard_seq(parent) -> list:
 # COMMAND HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _cmd_display_profile(parent):
+    pid = int(parent.wiz_profile_id.value())
+    parent._profile_display_pending_id = pid
+    parent._profile_display_pending_at = time.time()
+    _send(parent, f"temp_profile_diplay {pid}")
+    _parse_profile_display_log_tail(parent, pid)
+
+
 def _cmd_send_wizard(parent):
     if parent._wizard_sm and parent._wizard_sm.is_active():
         _log_resp(parent, "[WIZ] Already running — click CANCEL first")
@@ -1356,14 +1480,6 @@ def _on_wizard_finished(parent, ok, msg):
     parent.wiz_status_lbl.setStyleSheet(
         f"color:{color};font-size:11px;font-style:italic;background:transparent;"
     )
-
-
-def _cmd_wizard_send(parent):
-    text = parent.tc_wizard_input.text().strip()
-    if not text:
-        return
-    _send(parent, text)
-    parent.tc_wizard_input.clear()
 
 
 def _cmd_pid_get(parent):
@@ -1436,10 +1552,326 @@ def _log_resp(parent, msg: str):
         parent.tc_response_box.append(msg)
 
 
+def _profile_display_cache(parent):
+    if not hasattr(parent, "_profile_display_cache"):
+        parent._profile_display_cache = {}
+    return parent._profile_display_cache
+
+
+def _clean_profile_display_line(line: str) -> str:
+    text = str(line or "").strip()
+    text = re.sub(r"^\[[^\]]+\]\s*", "", text)
+    text = text.lstrip("→").strip()
+    return text
+
+
+def _profile_id_from_line(line: str, fallback=None):
+    patterns = (
+        r"\bprofile\s*\[\s*(\d+)\s*\]",
+        r"\bprofile[_\s-]*(?:id|index)\s*[:=#]?\s*(\d+)",
+        r"\bprofile\s*(?:id|index)?\s*[:=#]?\s*(\d+)",
+    )
+    for pattern in patterns:
+        m = re.search(pattern, line, re.IGNORECASE)
+        if m:
+            pid = int(m.group(1))
+            if 0 <= pid <= 7:
+                return pid
+    return fallback
+
+
+def _profile_temp_value(raw, line: str):
+    value = float(raw)
+    if abs(value) > 200 or "0.01" in line.lower():
+        value /= 100.0
+    return value
+
+
+def _profile_mode_name(raw):
+    text = str(raw).strip().upper()
+    return {"0": "SOAK", "1": "HEAT", "2": "COOL"}.get(text, text)
+
+
+def _ensure_profile_display(parent, pid):
+    cache = _profile_display_cache(parent)
+    return cache.setdefault(pid, {
+        "id": pid,
+        "main_ntc": None,
+        "sec_ntc": None,
+        "tec_mask": None,
+        "heater_mask": None,
+        "setpoint": None,
+        "delta": None,
+        "step_count": None,
+        "steps": {},
+    })
+
+
+def _set_profile_field(profile, key, value):
+    if profile.get(key) == value:
+        return False
+    profile[key] = value
+    return True
+
+
+def _extract_profile_fields(line: str, profile: dict) -> bool:
+    changed = False
+    int_fields = {
+        "main_ntc": (
+            r"\bmain(?:[_\s-]*ntc)?\b\s*[:=]\s*(-?\d+)",
+            r"\bmain[_\s-]*ntc\b[^\d+-]*(-?\d+)",
+        ),
+        "sec_ntc": (
+            r"\bsec(?:ondary)?(?:[_\s-]*ntc)?\b\s*[:=]\s*(-?\d+)",
+            r"\bsec[_\s-]*ntc\b[^\d+-]*(-?\d+)",
+        ),
+        "tec_mask": (
+            r"\btec(?:[_\s-]*mask)?\b\s*[:=]\s*(-?\d+)",
+            r"\btec[_\s-]*mask\b[^\d+-]*(-?\d+)",
+        ),
+        "heater_mask": (
+            r"\bheater(?:[_\s-]*mask)?\b\s*[:=]\s*(-?\d+)",
+            r"\bheater[_\s-]*mask\b[^\d+-]*(-?\d+)",
+        ),
+        "step_count": (
+            r"\bstep[_\s-]*count\b[^\d+-]*(-?\d+)",
+            r"\bsteps\b[^\d+-]*(-?\d+)",
+        ),
+    }
+    for key, patterns in int_fields.items():
+        for pattern in patterns:
+            m = re.search(pattern, line, re.IGNORECASE)
+            if m:
+                changed |= _set_profile_field(profile, key, int(m.group(1)))
+                break
+
+    float_fields = {
+        "setpoint": (
+            r"\bset\s*point\b[^\d+-]*([+-]?\d+(?:\.\d+)?)",
+            r"\bsetpoint\b[^\d+-]*([+-]?\d+(?:\.\d+)?)",
+        ),
+        "delta": (
+            r"\b(?:main\s*-\s*sec\s*)?delta\b[^\d+-]*([+-]?\d+(?:\.\d+)?)",
+        ),
+    }
+    for key, patterns in float_fields.items():
+        for pattern in patterns:
+            m = re.search(pattern, line, re.IGNORECASE)
+            if m:
+                changed |= _set_profile_field(
+                    profile,
+                    key,
+                    _profile_temp_value(m.group(1), line),
+                )
+                break
+    return changed
+
+
+def _extract_profile_step(line: str, profile: dict) -> bool:
+    m = re.search(r"\bstep\s*\[?\s*(\d+)\s*\]?\s*[:=]?\s*(.*)$", line, re.IGNORECASE)
+    if not m:
+        return False
+
+    step_idx = int(m.group(1))
+    rest = m.group(2)
+    if not 0 <= step_idx < MAX_STEPS:
+        return False
+
+    named = {}
+    for key, pattern in {
+        "start": r"\bstart\b[^\d+-]*([+-]?\d+(?:\.\d+)?)",
+        "stop": r"\b(?:stop|end)\b[^\d+-]*([+-]?\d+(?:\.\d+)?)",
+        "duration": r"\b(?:duration|dur)\b[^\d+-]*(\d+)",
+        "mode": r"\bmode\b[^\w+-]*([A-Za-z]+|\d+)",
+    }.items():
+        match = re.search(pattern, rest, re.IGNORECASE)
+        if match:
+            named[key] = match.group(1)
+
+    if {"start", "stop", "duration"}.issubset(named):
+        start = _profile_temp_value(named["start"], line)
+        stop = _profile_temp_value(named["stop"], line)
+        duration = int(float(named["duration"]))
+        mode = _profile_mode_name(named.get("mode", ""))
+    else:
+        nums = re.findall(r"[+-]?\d+(?:\.\d+)?", rest)
+        if len(nums) < 3:
+            return False
+        start = _profile_temp_value(nums[0], line)
+        stop = _profile_temp_value(nums[1], line)
+        duration = int(float(nums[2]))
+        mode = _profile_mode_name(nums[3]) if len(nums) > 3 else ""
+
+    step = {
+        "start": start,
+        "stop": stop,
+        "duration": duration,
+        "mode": mode,
+    }
+    if profile["steps"].get(step_idx) == step:
+        return False
+    profile["steps"][step_idx] = step
+    return True
+
+
+def _extract_compact_profile_line(parent, line: str, profile: dict) -> bool:
+    pending_at = getattr(parent, "_profile_display_pending_at", 0)
+    if time.time() - pending_at > 15:
+        return False
+    if "pid:" in line.lower() or line.upper().startswith("STEP="):
+        return False
+
+    nums = re.findall(r"[+-]?\d+(?:\.\d+)?", line)
+    if len(nums) < 7:
+        return False
+
+    offset = 0
+    maybe_pid = int(float(nums[0]))
+    if 0 <= maybe_pid <= 7 and len(nums) >= 8:
+        offset = 1
+
+    values = nums[offset:offset + 7]
+    changed = False
+    changed |= _set_profile_field(profile, "main_ntc", int(float(values[0])))
+    changed |= _set_profile_field(profile, "sec_ntc", int(float(values[1])))
+    changed |= _set_profile_field(profile, "tec_mask", int(float(values[2])))
+    changed |= _set_profile_field(profile, "heater_mask", int(float(values[3])))
+    changed |= _set_profile_field(profile, "setpoint", _profile_temp_value(values[4], line))
+    changed |= _set_profile_field(profile, "delta", _profile_temp_value(values[5], line))
+    changed |= _set_profile_field(profile, "step_count", int(float(values[6])))
+    return changed
+
+
+def _merge_display_profile_into_form_cache(parent, profile: dict):
+    pid = int(profile["id"])
+    cache = _ensure_wizard_profile_cache(parent)
+    snapshot = cache.get(pid, _default_wizard_profile_snapshot())
+
+    for source, target in (
+        ("main_ntc", "main_ntc"),
+        ("sec_ntc", "sec_ntc"),
+        ("tec_mask", "tec_mask"),
+        ("heater_mask", "heater_mask"),
+        ("setpoint", "setpoint"),
+        ("delta", "delta"),
+        ("step_count", "step_count"),
+    ):
+        if profile.get(source) is not None:
+            snapshot[target] = profile[source]
+
+    steps = snapshot.setdefault("steps", _default_wizard_profile_snapshot()["steps"])
+    for idx, step in profile.get("steps", {}).items():
+        if idx < len(steps):
+            steps[idx] = {
+                "start": float(step.get("start", 25.0)),
+                "stop": float(step.get("stop", 40.0)),
+                "duration": int(step.get("duration", 60)),
+            }
+
+    cache[pid] = snapshot
+    if getattr(parent, "_wiz_current_profile_id", None) == pid:
+        _apply_wizard_profile_snapshot(parent, snapshot)
+
+
+def _fmt_profile_value(value):
+    if value is None:
+        return "--"
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
+
+
+def _step_mode_short(mode):
+    return {"HEAT": "H", "COOL": "C", "SOAK": "S"}.get(str(mode).upper(), "")
+
+
+def _profile_steps_summary(profile):
+    steps = profile.get("steps", {})
+    count = profile.get("step_count")
+    if not steps:
+        return f"{count} step" if count is not None else "--"
+
+    parts = []
+    for idx in sorted(steps):
+        step = steps[idx]
+        parts.append(
+            f"{idx}:{_fmt_profile_value(step.get('start'))}"
+            f"->{_fmt_profile_value(step.get('stop'))}"
+            f"/{step.get('duration', '--')}s"
+            f"{_step_mode_short(step.get('mode'))}"
+        )
+    prefix = f"{count} | " if count is not None else ""
+    return prefix + "; ".join(parts)
+
+
+def _refresh_profile_display_table(parent):
+    table = getattr(parent, "profile_display_table", None)
+    if table is None:
+        return
+
+    cache = _profile_display_cache(parent)
+    table.setRowCount(0)
+    for row, pid in enumerate(sorted(cache)):
+        profile = cache[pid]
+        table.insertRow(row)
+        values = [
+            pid,
+            profile.get("main_ntc"),
+            profile.get("sec_ntc"),
+            profile.get("tec_mask"),
+            profile.get("heater_mask"),
+            profile.get("setpoint"),
+            profile.get("delta"),
+            _profile_steps_summary(profile),
+        ]
+        for col, value in enumerate(values):
+            item = QTableWidgetItem(_fmt_profile_value(value))
+            item.setTextAlignment(Qt.AlignCenter if col < 7 else Qt.AlignLeft | Qt.AlignVCenter)
+            table.setItem(row, col, item)
+
+
+def _capture_profile_display_line(parent, line: str, force_pid=None):
+    text = _clean_profile_display_line(line)
+    if not text:
+        return
+
+    pending_id = getattr(parent, "_profile_display_pending_id", None)
+    pid = _profile_id_from_line(text, force_pid if force_pid is not None else pending_id)
+    if pid is None:
+        return
+
+    profile = _ensure_profile_display(parent, int(pid))
+    changed = False
+    changed |= _extract_profile_fields(text, profile)
+    changed |= _extract_profile_step(text, profile)
+    if not changed:
+        changed |= _extract_compact_profile_line(parent, text, profile)
+
+    if changed:
+        _merge_display_profile_into_form_cache(parent, profile)
+        _refresh_profile_display_table(parent)
+
+
+def _parse_profile_display_log_tail(parent, pid):
+    box = getattr(parent, "tc_response_box", None)
+    if box is None:
+        return
+    lines = box.toPlainText().splitlines()[-120:]
+    start = len(lines)
+    command_re = re.compile(rf"\btemp_profile_diplay\s+{int(pid)}\b", re.IGNORECASE)
+    for idx in range(len(lines) - 1, -1, -1):
+        if command_re.search(lines[idx]):
+            start = idx + 1
+            break
+    for line in lines[start:]:
+        _capture_profile_display_line(parent, line, force_pid=pid)
+
+
 def pipe_to_response(parent, line: str):
     """Pipe UART line → response box + feed wizard. Gọi từ protocol_parser."""
     if hasattr(parent, "tc_response_box"):
         parent.tc_response_box.append(f"  {line}")
+    _capture_profile_display_line(parent, line)
     if hasattr(parent, "_wizard_sm") and parent._wizard_sm:
         parent._wizard_sm.feed_line(line)
 

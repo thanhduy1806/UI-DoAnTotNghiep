@@ -143,13 +143,14 @@ def create_manual_group_box(parent):
 
     # ── 4 × 6 grid  (24 lasers) ───────────────────────────────────────────────
     grid = QGridLayout()
-    grid.setSpacing(4)
+    grid.setHorizontalSpacing(10)
+    grid.setVerticalSpacing(3)
 
     parent._laser_buttons = {}
 
     for pos in range(1, 25):          # 1 … 24
-        row = (pos - 1) // 6
-        col = (pos - 1) % 6
+        row = (pos - 1) // 4
+        col = (pos - 1) % 4
 
         btn = _LaserButton(pos)
         btn.clicked.connect(lambda _, x=pos: laser_click(parent, x))
@@ -252,7 +253,7 @@ class _LaserButton(QPushButton):
         self._index = index
         self._drive_current = None
         self._photo_current = None
-        self.setFixedSize(38, 32)
+        self.setFixedSize(54, 28)
         self._active = False
         self.setStyleSheet(self._style_idle())
 
