@@ -78,8 +78,9 @@ def create_manual_group_box(parent):
 
     # ── Power input row ───────────────────────────────────────────────────────
     power_row = QHBoxLayout()
+    power_row.setSpacing(6)
     parent.manual_power_label = QLabel("Power %")
-    parent.manual_power_label.setFixedWidth(72)
+    parent.manual_power_label.setFixedWidth(104)
 
     parent.manual_percent = QLineEdit()
     parent.manual_percent.setPlaceholderText("0 – 100")
@@ -101,8 +102,36 @@ def create_manual_group_box(parent):
 
     power_row.addWidget(parent.manual_power_label)
     power_row.addWidget(parent.manual_percent)
-    power_row.addWidget(parent.manual_pct_unit)
     outer.addLayout(power_row)
+
+    parent._manual_param_labels = []
+    parent._manual_param_inputs = [parent.manual_percent]
+    manual_input_style = parent.manual_percent.styleSheet()
+
+    for label_text, attr in (
+        ("Sample rate", "manual_sample_rate"),
+        ("Pre laser", "manual_pre_laser"),
+        ("Laser duration", "manual_laser_duration"),
+        ("After laser", "manual_after_laser"),
+    ):
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        label = QLabel(label_text)
+        label.setFixedWidth(104)
+
+        edit = QLineEdit()
+        edit.setPlaceholderText("0")
+        edit.setFixedHeight(30)
+        edit.setStyleSheet(manual_input_style)
+
+        setattr(parent, attr, edit)
+        parent._manual_param_labels.append(label)
+        parent._manual_param_inputs.append(edit)
+
+        row.addWidget(label)
+        row.addWidget(edit)
+        outer.addLayout(row)
 
     # ── Divider ───────────────────────────────────────────────────────────────
     parent.manual_divider = QFrame()
@@ -114,7 +143,7 @@ def create_manual_group_box(parent):
 
     # ── 4 × 6 grid  (24 lasers) ───────────────────────────────────────────────
     grid = QGridLayout()
-    grid.setSpacing(6)
+    grid.setSpacing(4)
 
     parent._laser_buttons = {}
 
@@ -145,6 +174,8 @@ def create_manual_group_box(parent):
     outer.addLayout(qf_row)
 
     group.setLayout(outer)
+    group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    group.setMinimumHeight(group.sizeHint().height())
     apply_manual_theme(parent)
     return group
 
@@ -186,7 +217,7 @@ class _LaserButton(QPushButton):
             border: 1.5px solid {t["border"]};
             border-radius: 6px;
             color: {t["laser_idle_text"]};
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 700;
         }}
         QPushButton:hover {{
@@ -208,7 +239,7 @@ class _LaserButton(QPushButton):
             border: 1.5px solid {t["accent_teal"]};
             border-radius: 6px;
             color: {t["accent_teal"]};
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 800;
         }}
         QPushButton:hover {{
@@ -221,7 +252,7 @@ class _LaserButton(QPushButton):
         self._index = index
         self._drive_current = None
         self._photo_current = None
-        self.setFixedSize(44, 42)
+        self.setFixedSize(38, 32)
         self._active = False
         self.setStyleSheet(self._style_idle())
 
@@ -298,13 +329,15 @@ def apply_manual_theme(parent):
     label_style = f"color: {t['text_secondary']}; font-size: 13px; font-weight: 600;"
     parent.manual_power_label.setStyleSheet(label_style)
     parent.manual_pct_unit.setStyleSheet(label_style)
+    for label in getattr(parent, "_manual_param_labels", []):
+        label.setStyleSheet(label_style)
     parent.manual_grid_label.setStyleSheet(
         f"color: {t['text_secondary']}; font-size: 12px; font-weight: 600;"
     )
     parent.manual_divider.setStyleSheet(
         f"background: {t['border']}; max-height: 1px; border: none;"
     )
-    parent.manual_percent.setStyleSheet(f"""
+    field_style = f"""
         QLineEdit {{
             background: {t["bg_surface"]};
             border: 1.5px solid {t["border"]};
@@ -315,7 +348,9 @@ def apply_manual_theme(parent):
             padding: 3px 10px;
         }}
         QLineEdit:focus {{ border-color: {t["accent_cyan"]}; }}
-    """)
+    """
+    for edit in getattr(parent, "_manual_param_inputs", [parent.manual_percent]):
+        edit.setStyleSheet(field_style)
 
     for btn in getattr(parent, "_laser_buttons", {}).values():
         btn.set_active(btn._active)
@@ -439,14 +474,17 @@ def _format_current(value):
 
 
 def laser_click(parent, pos: int):
-    """Start one laser experiment with the new exp_start_laser CLI."""
+    """Start one scheduled laser experiment with the exp_start_laser CLI."""
     btn = parent._laser_buttons.get(pos)
     if btn and btn._active:
+        _send_uart_command(parent, "exp_end")
+        clear_gui_laser_exp_pending(parent)
         btn.set_active(False)
         _set_laser_drive_current(parent, pos, 0)
+        parent._manual_running_laser_pos = None
         return
 
-    power_value = _manual_power_value(parent.manual_percent.text())
+    power_value, sample_rate, pre_laser, laser_duration, after_laser = _manual_exp_params(parent)
     parent._manual_running_laser_pos = pos
     parent._manual_selected_laser_pos = pos
     parent._manual_laser_started_at = _now_text()
@@ -454,12 +492,16 @@ def laser_click(parent, pos: int):
     if btn:
         btn.set_active(True)
     _set_laser_drive_current(parent, pos, power_value)
-    _send_uart_command(parent, f"exp_start_laser {pos} {power_value}")
+    mark_gui_laser_exp_started(parent)
+    _send_uart_command(
+        parent,
+        f"exp_start_laser {pos} {power_value} {sample_rate} {pre_laser} {laser_duration} {after_laser}",
+    )
 
 
 def fire_all(parent):
-    """Start all laser experiments with the selected power."""
-    power_value = _manual_power_value(parent.manual_percent.text())
+    """Start all laser experiments with the selected manual schedule."""
+    power_value, sample_rate, pre_laser, laser_duration, after_laser = _manual_exp_params(parent)
     parent._manual_all_drive = power_value
     for pos in range(1, 25):
         btn = parent._laser_buttons.get(pos)
@@ -469,12 +511,18 @@ def fire_all(parent):
         parent._manual_selected_laser_pos = pos
         parent._manual_laser_started_at = _now_text()
         _set_laser_drive_current(parent, pos, power_value)
-        _send_uart_command(parent, f"exp_start_laser {pos} {power_value}")
+        mark_gui_laser_exp_started(parent)
+        _send_uart_command(
+            parent,
+            f"exp_start_laser {pos} {power_value} {sample_rate} {pre_laser} {laser_duration} {after_laser}",
+        )
     _refresh_laser_status(parent, "ALL")
 
 
 def off_all(parent):
-    """Clear active highlights in the GUI only; firmware auto-stops experiments."""
+    """Stop the current experiment and clear active highlights in the GUI."""
+    _send_uart_command(parent, "exp_end")
+    clear_gui_laser_exp_pending(parent)
     for pos in range(1, 25):
         btn = parent._laser_buttons.get(pos)
         if btn:
@@ -493,6 +541,43 @@ def _manual_power_value(text: str) -> int:
 
     percent = max(0, min(100, percent))
     return round(percent)
+
+
+def _manual_exp_params(parent):
+    return (
+        _manual_power_value(parent.manual_percent.text()),
+        _manual_nonnegative_int_value(parent.manual_sample_rate.text()),
+        _manual_nonnegative_int_value(parent.manual_pre_laser.text()),
+        _manual_nonnegative_int_value(parent.manual_laser_duration.text()),
+        _manual_nonnegative_int_value(parent.manual_after_laser.text()),
+    )
+
+
+def _manual_nonnegative_int_value(text: str) -> int:
+    try:
+        value = float(text.strip() or "0")
+    except ValueError:
+        value = 0
+
+    return max(0, round(value))
+
+
+def mark_gui_laser_exp_started(parent, count: int = 1):
+    pending = getattr(parent, "_manual_gui_laser_exp_pending", 0)
+    parent._manual_gui_laser_exp_pending = max(0, pending) + max(0, count)
+
+
+def consume_gui_laser_exp_pending(parent) -> bool:
+    pending = getattr(parent, "_manual_gui_laser_exp_pending", 0)
+    if pending <= 0:
+        return False
+
+    parent._manual_gui_laser_exp_pending = pending - 1
+    return True
+
+
+def clear_gui_laser_exp_pending(parent):
+    parent._manual_gui_laser_exp_pending = 0
 
 
 def _send_uart_command(parent, cmd: str):

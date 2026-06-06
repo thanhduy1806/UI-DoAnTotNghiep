@@ -1,7 +1,8 @@
 from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout,
     QTextEdit, QTabWidget,
-    QGridLayout, QFrame, QLabel, QPushButton
+    QGridLayout, QFrame, QLabel, QPushButton,
+    QSizePolicy
 )
 from PyQt5.QtCore import QTimer
 
@@ -265,6 +266,8 @@ class CubeSatMonitor(QWidget):
 
         self.tabs.addTab(self.manual_box, "Manual")
         self.tabs.addTab(self.auto_box,   "Auto")
+        self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.tabs.setMinimumHeight(self.tabs.sizeHint().height())
 
         lay.addWidget(self.tabs, stretch=0)
 

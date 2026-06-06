@@ -310,7 +310,11 @@ def parse_uart_line(line: str):
 
         if re.fullmatch(r"EXP\s+DONE!", line, re.IGNORECASE):
             if global_var.window:
-                from exp_manual import finish_laser_experiment
+                from exp_manual import clear_gui_laser_exp_pending, consume_gui_laser_exp_pending, finish_laser_experiment
+                if consume_gui_laser_exp_pending(global_var.window):
+                    if hasattr(global_var.window, "uart") and global_var.window.uart:
+                        global_var.window.uart.send_command("exp_end")
+                        clear_gui_laser_exp_pending(global_var.window)
                 finish_laser_experiment(global_var.window)
             return
     except Exception as e:

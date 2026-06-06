@@ -96,14 +96,15 @@ class _PidGraphViewBox(pg.ViewBox):
 
     def mouseClickEvent(self, ev):
         if ev.button() == Qt.LeftButton and self._is_pid_plot_area_pos(ev.pos()):
-            _move_pid_measure_cursor(self._pid_ui_parent, self, ev.pos())
+            _move_pid_measure_cursor(self._pid_ui_parent, self, ev.pos(), advance=True)
             ev.accept()
             return
         super().mouseClickEvent(ev)
 
     def mouseDragEvent(self, ev, axis=None):
         if axis is None and ev.button() == Qt.LeftButton and self._is_pid_plot_area_pos(ev.pos()):
-            _move_pid_measure_cursor(self._pid_ui_parent, self, ev.pos())
+            advance = hasattr(ev, "isStart") and ev.isStart()
+            _move_pid_measure_cursor(self._pid_ui_parent, self, ev.pos(), advance=advance)
             ev.accept()
             return
         super().mouseDragEvent(ev, axis=axis)
@@ -131,13 +132,14 @@ class _PidGraphAxis(pg.AxisItem):
 
 
 class _PidMeasureLabel(pg.TextItem):
-    def __init__(self, ui_parent, *args, **kwargs):
+    def __init__(self, ui_parent, measure_index, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._pid_ui_parent = ui_parent
+        self._pid_measure_index = measure_index
 
     def mouseClickEvent(self, ev):
         if ev.button() == Qt.LeftButton:
-            _hide_pid_measure_cursor(self._pid_ui_parent)
+            _hide_pid_measure_cursor(self._pid_ui_parent, self._pid_measure_index)
             ev.accept()
             return
         ev.ignore()
@@ -182,6 +184,8 @@ def apply_temp_ctrl_theme():
 
 
 WIZ_TRIGGERS = [
+    # Firmware uses this same prompt for the initial confirm and final save.
+    "please enter y or n",
     "(y/n)",
     "profile index:",
     "main ntc:",
@@ -425,24 +429,36 @@ def _build_pid_graph(parent) -> QGroupBox:
         parent.pid_profile_curves[profile_id] = curve
         setattr(parent, f"pid_curve_{key}", curve)
 
-    measure_pen = pg.mkPen(color=ACCENT_CYAN, width=1, style=Qt.DashLine)
-    parent._pid_measure_x_line = pg.InfiniteLine(angle=90, movable=False, pen=measure_pen)
-    parent._pid_measure_y_line = pg.InfiniteLine(angle=0, movable=False, pen=measure_pen)
-    parent._pid_measure_label = _PidMeasureLabel(
-        parent,
-        color=TEXT_PRIM,
-        fill=pg.mkBrush(BG_SURFACE + "E8"),
-        border=pg.mkPen(color=BORDER),
-        anchor=(0, 1),
-    )
-    for item in (
-        parent._pid_measure_x_line,
-        parent._pid_measure_y_line,
-        parent._pid_measure_label,
-    ):
-        item.setZValue(20)
-        item.hide()
-        pw.addItem(item, ignoreBounds=True)
+    parent._pid_measure_cursors = []
+    parent._pid_measure_active_index = None
+    for measure_index, (name, color) in enumerate((("A", ACCENT_CYAN), ("B", ACCENT_WARN))):
+        measure_pen = pg.mkPen(color=color, width=1, style=Qt.DashLine)
+        x_line = pg.InfiniteLine(angle=90, movable=False, pen=measure_pen)
+        y_line = pg.InfiniteLine(angle=0, movable=False, pen=measure_pen)
+        label = _PidMeasureLabel(
+            parent,
+            measure_index,
+            color=TEXT_PRIM,
+            fill=pg.mkBrush(BG_SURFACE + "E8"),
+            border=pg.mkPen(color=color),
+            anchor=(0, 1),
+        )
+        cursor = {
+            "name": name,
+            "x_line": x_line,
+            "y_line": y_line,
+            "label": label,
+            "point": None,
+        }
+        parent._pid_measure_cursors.append(cursor)
+        for item in (x_line, y_line, label):
+            item.setZValue(20 + measure_index)
+            item.hide()
+            pw.addItem(item, ignoreBounds=True)
+
+    parent._pid_measure_x_line = parent._pid_measure_cursors[0]["x_line"]
+    parent._pid_measure_y_line = parent._pid_measure_cursors[0]["y_line"]
+    parent._pid_measure_label = parent._pid_measure_cursors[0]["label"]
 
     parent._pid_plot_widget = pw
     parent._pid_follow_latest = True
@@ -893,22 +909,72 @@ def _pid_wheel_delta(ev):
     return 0
 
 
-def _move_pid_measure_cursor(parent, view_box, pos):
-    if not hasattr(parent, "_pid_measure_x_line"):
+def _move_pid_measure_cursor(parent, view_box, pos, advance=False):
+    cursors = getattr(parent, "_pid_measure_cursors", None)
+    if not cursors:
         return
 
     snap_point = _nearest_pid_curve_point(parent, view_box, pos)
     if snap_point is None:
         return
 
+    cursor_index = _pid_measure_cursor_index(parent, advance=advance)
+    cursor = cursors[cursor_index]
     x_value, y_value = snap_point
-    parent._pid_measure_x_line.setPos(x_value)
-    parent._pid_measure_y_line.setPos(y_value)
-    parent._pid_measure_label.setText(f"Time: {x_value:.2f} s\nTemp: {y_value:.2f} C")
-    parent._pid_measure_label.setPos(x_value, y_value)
-    parent._pid_measure_x_line.show()
-    parent._pid_measure_y_line.show()
-    parent._pid_measure_label.show()
+    cursor["point"] = (x_value, y_value)
+    cursor["x_line"].setPos(x_value)
+    cursor["y_line"].setPos(y_value)
+    cursor["label"].setPos(x_value, y_value)
+    cursor["x_line"].show()
+    cursor["y_line"].show()
+    cursor["label"].show()
+    parent._pid_measure_active_index = cursor_index
+    _refresh_pid_measure_labels(parent)
+
+
+def _refresh_pid_measure_labels(parent):
+    cursors = getattr(parent, "_pid_measure_cursors", [])
+    if not cursors:
+        return
+
+    points = [
+        cursor.get("point")
+        if cursor["label"].isVisible()
+        else None
+        for cursor in cursors
+    ]
+    delta_text = ""
+    if len(points) >= 2 and points[0] is not None and points[1] is not None:
+        dx = points[1][0] - points[0][0]
+        dy = points[1][1] - points[0][1]
+        delta_text = f"\nDelta Time: {dx:+.2f} s\nDelta Temp: {dy:+.2f} C"
+
+    for index, cursor in enumerate(cursors):
+        point = cursor.get("point")
+        if point is None:
+            continue
+        extra = delta_text if index == 1 and delta_text else ""
+        cursor["label"].setText(
+            f"{cursor['name']}\nTime: {point[0]:.2f} s\nTemp: {point[1]:.2f} C{extra}"
+        )
+
+
+def _pid_measure_cursor_index(parent, advance=False):
+    cursors = getattr(parent, "_pid_measure_cursors", [])
+    if not cursors:
+        return 0
+
+    active = getattr(parent, "_pid_measure_active_index", None)
+    if not advance and active is not None:
+        return active
+
+    for index, cursor in enumerate(cursors):
+        if not cursor["label"].isVisible():
+            return index
+
+    if active is None:
+        return 0
+    return (active + 1) % len(cursors)
 
 
 def _nearest_pid_curve_point(parent, view_box, pos):
@@ -955,15 +1021,27 @@ def _nearest_pid_curve_point(parent, view_box, pos):
     return nearest
 
 
-def _hide_pid_measure_cursor(parent):
-    for name in (
-        "_pid_measure_x_line",
-        "_pid_measure_y_line",
-        "_pid_measure_label",
-    ):
-        item = getattr(parent, name, None)
-        if item is not None:
+def _hide_pid_measure_cursor(parent, measure_index=None):
+    cursors = getattr(parent, "_pid_measure_cursors", [])
+    if measure_index is None:
+        indexes = range(len(cursors))
+    else:
+        indexes = (measure_index,)
+
+    for index in indexes:
+        if index < 0 or index >= len(cursors):
+            continue
+        cursors[index]["point"] = None
+        for item in (
+            cursors[index]["x_line"],
+            cursors[index]["y_line"],
+            cursors[index]["label"],
+        ):
             item.hide()
+
+    if measure_index == getattr(parent, "_pid_measure_active_index", None):
+        parent._pid_measure_active_index = None
+    _refresh_pid_measure_labels(parent)
 
 
 def _wheel_zoom_pid_plot(parent, view_box, ev, zoom_x=True, zoom_y=True):
@@ -1232,7 +1310,7 @@ def _build_wizard_seq(parent) -> list:
         # Format: start stop duration mode  (4 số, đúng firmware format)
         seq.append(f"{sv} {ev} {dv} {mv}")
 
-    seq.append("y")   # save
+    seq.append("y")   # final save confirm; firmware may prompt "Please enter Y or N:"
     return seq
 
 
