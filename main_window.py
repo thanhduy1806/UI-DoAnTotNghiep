@@ -33,6 +33,9 @@ from exp_manual import apply_manual_theme
 from exp_auto import create_auto_group_box
 
 
+BMP390_POLL_INTERVAL_MS = 5 * 60 * 1000
+
+
 # ─── COLOR PALETTE ─────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════
 # MAIN WINDOW
@@ -98,7 +101,8 @@ class CubeSatMonitor(QWidget):
 
         self.bmp390_timer = QTimer()
         self.bmp390_timer.timeout.connect(self._poll_bmp390)
-        self.bmp390_timer.start(10000)
+        self._bmp390_paused_for_temp_auto = False
+        self.bmp390_timer.start(BMP390_POLL_INTERVAL_MS)
 
         self._apply_theme()
     
@@ -162,6 +166,10 @@ class CubeSatMonitor(QWidget):
 
     def _poll_bmp390(self):
         try:
+            if getattr(self, "_bmp390_paused_for_temp_auto", False):
+                return
+            if getattr(global_var, "pid_graph_session_active", False):
+                return
             if not hasattr(self, "uart") or not self.uart:
                 return
             if not getattr(self.uart, "ser", None):
@@ -171,6 +179,18 @@ class CubeSatMonitor(QWidget):
 
         except Exception as e:
             print("BMP390 poll error:", e)
+
+    def pause_bmp390_for_temp_auto(self):
+        self._bmp390_paused_for_temp_auto = True
+        if hasattr(self, "bmp390_timer") and self.bmp390_timer.isActive():
+            self.bmp390_timer.stop()
+
+    def resume_bmp390_after_temp_auto(self, poll_now=True):
+        self._bmp390_paused_for_temp_auto = False
+        if hasattr(self, "bmp390_timer") and not self.bmp390_timer.isActive():
+            self.bmp390_timer.start(BMP390_POLL_INTERVAL_MS)
+        if poll_now:
+            QTimer.singleShot(300, self._poll_bmp390)
 
     def _toggle_theme(self):
         toggle_theme()

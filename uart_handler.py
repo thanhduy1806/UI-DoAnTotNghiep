@@ -145,6 +145,94 @@ class UARTHandler(QObject):                    # ← kế thừa QObject
 
 class SSHMinicomHandler(QObject):
     """SSH transport that exposes ttyS2 as the legacy command/data UART."""
+# class TCPBridgeHandler(QObject):
+#     """
+#     Thay thế SSHMinicomHandler. 
+#     Kết nối trực tiếp tới TCP port đã được socat mở trên Board IF.
+#     Loại bỏ hoàn toàn Minicom noise và SSH Shell overhead.
+#     """
+#     sig_log_ttys2 = pyqtSignal(str)
+#     sig_log_ttys5 = pyqtSignal(str)
+#     sig_data = pyqtSignal(str)
+
+#     def __init__(self, log_ttys2_callback, data_callback, log_ttys5_callback=None):
+#         super().__init__()
+#         self.sockets = {}
+#         self.running = False
+#         self.ser = None # Giữ để tương thích logic main_window
+
+#         self.sig_log_ttys2.connect(log_ttys2_callback, Qt.QueuedConnection)
+#         self.sig_log_ttys5.connect(log_ttys5_callback or log_ttys2_callback, Qt.QueuedConnection)
+#         self.sig_data.connect(data_callback, Qt.QueuedConnection)
+
+#     def connect(self, host, port_s2=2002, port_s5=2005):
+#         try:
+#             self.disconnect()
+#             self.running = True
+#             
+#             # Connect ttyS2 bridge
+#             s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+#             s2.connect((host, int(port_s2)))
+#             self.sockets["ttyS2"] = s2
+#             
+#             # Connect ttyS5 bridge
+#             s5 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+#             s5.connect((host, int(port_s5)))
+#             self.sockets["ttyS5"] = s5
+
+#             self.ser = True
+#             threading.Thread(target=self._read_thread, args=("ttyS2", s2), daemon=True).start()
+#             threading.Thread(target=self._read_thread, args=("ttyS5", s5), daemon=True).start()
+#             
+#             self.sig_log_ttys2.emit(f"[TCP] Connected to IF Bridge {host}:{port_s2}")
+#             return True
+#         except Exception as e:
+#             self.sig_log_ttys2.emit(f"[TCP ERROR] {e}")
+#             return False
+
+#     def disconnect(self):
+#         self.running = False
+#         for name, s in self.sockets.items():
+#             try: s.close()
+#             except: pass
+#         self.sockets.clear()
+#         self.ser = None
+
+#     def send_command(self, cmd):
+#         self._send("ttyS2", cmd)
+
+#     def send_ttys5_command(self, cmd):
+#         self._send("ttyS5", cmd)
+
+#     def _send(self, name, cmd):
+#         s = self.sockets.get(name)
+#         if s and self.running:
+#             try:
+#                 s.sendall((cmd + "\n").encode("utf-8"))
+#                 if name == "ttyS2": self.sig_log_ttys2.emit(f"[{name} TX] {cmd}")
+#             except Exception as e:
+#                 self.sig_log_ttys2.emit(f"[{name} TX ERROR] {e}")
+
+#     def _read_thread(self, name, sock):
+#         buffer = ""
+#         while self.running:
+#             try:
+#                 data = sock.recv(4096)
+#                 if not data: break
+#                 
+#                 text = data.decode("utf-8", errors="replace")
+#                 buffer += text
+#                 while "\n" in buffer:
+#                     line, buffer = buffer.split("\n", 1)
+#                     line = line.strip()
+#                     if not line: continue
+#                     
+#                     if name == "ttyS2":
+#                         self.sig_log_ttys2.emit(f"[{name} RX] {line}")
+#                         self.sig_data.emit(line)
+#                     else:
+#                         self.sig_log_ttys5.emit(f"[{name} RX] {line}")
+#             except: break
 
     sig_log_ttys2 = pyqtSignal(str)
     sig_log_ttys5 = pyqtSignal(str)
