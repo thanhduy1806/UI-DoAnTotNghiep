@@ -184,32 +184,17 @@ def apply_temp_ctrl_theme():
         }
 
 
-WIZ_TRIGGERS = [
-    # Firmware uses this same prompt for the initial confirm and final save.
-    "please enter y or n",
-    "(y/n)",
-    "profile index:",
-    "main ntc:",
-    "sec ntc:",
-    "tec mask:",
-    "heater mask:",
-    "setpoint (0.01*c):",
-    "main-sec delta (0.01*c):",
-    "step count:",
-    "step[",
-    "save? (y/n)",
-]
-
-
 class WizardStateMachine(QObject):
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, parent, seq: list):
+    def __init__(self, parent, start_cmd: str, seq: list):
         super().__init__()
         self._parent = parent
+        self._start_cmd = start_cmd
         self._seq    = seq
         self._idx    = 0
         self._active = False
+        self._seen_saved = False
 
         self._timeout = QTimer(self)
         self._timeout.setSingleShot(True)
@@ -217,28 +202,48 @@ class WizardStateMachine(QObject):
 
     def start(self):
         self._active = True
-        self._idx    = 1                        # seq[0] đã gửi bên ngoài
-        _send(self._parent, self._seq[0])
-        _log_resp(self._parent,
-                  f"[WIZ] Started — {len(self._seq)-1} responses queued")
+        self._idx    = 0
+        self._seen_saved = False
+        _send(self._parent, self._start_cmd)
+        _log_resp(self._parent, f"[WIZ] Started — Waiting for first prompt...")
         self._reset_timeout()
 
     def feed_line(self, line: str):
-        if not self._active or self._idx >= len(self._seq):
-            return
-        if not any(t in line.lower() for t in WIZ_TRIGGERS):
+        if not self._active:
             return
 
-        resp = self._seq[self._idx]
-        self._idx += 1
-        _log_resp(self._parent,
-                  f"[WIZ {self._idx}/{len(self._seq)}] "
-                  f"← '{line.strip()[:48]}'  →  '{resp}'")
-        _send(self._parent, resp)
-        self._reset_timeout()
+        line_l = line.lower()
+        if "saved" in line_l:
+            self._seen_saved = True
 
+        # Nếu đã gửi hết kịch bản chính, kiểm tra tín hiệu kết thúc
         if self._idx >= len(self._seq):
-            self._finish(True, "Profile saved ✓")
+            if self._seen_saved and "debug@mcu" in line_l:
+                self._finish(True, "Profile saved ✓")
+            return
+
+        # Chiến lược "Trigger Search": Duyệt từ bước hiện tại để tìm trigger khớp
+        # Điều này giúp xử lý vấn đề SSH lag/jitter khi prompts bị gộp hoặc đến chậm
+        for i in range(self._idx, len(self._seq)):
+            trigger, resp = self._seq[i]
+            if trigger.lower() in line_l:
+                # Cập nhật index và gửi phản hồi tương ứng
+                self._idx = i + 1
+                _log_resp(self._parent, f"[WIZ {self._idx}/{len(self._seq)}] Match: '{trigger}' → Sending: '{resp}'")
+                _send(self._parent, resp)
+                self._reset_timeout()
+                return  # Đã phản hồi xong cho dòng này
+
+        for i in range(0, self._idx):
+            trigger, resp = self._seq[i]
+            if not trigger.lower().startswith("step["):
+                continue
+            if trigger.lower() not in line_l:
+                continue
+            _log_resp(self._parent, f"[WIZ {self._idx}/{len(self._seq)}] Retry: '{trigger}' â†’ Sending: '{resp}'")
+            _send(self._parent, resp)
+            self._reset_timeout()
+            return
 
     def cancel(self):
         self._active = False
@@ -299,11 +304,14 @@ def create_temp_ctrl_tab(parent) -> QWidget:
     lay.setSpacing(10)
     lay.setContentsMargins(6, 6, 6, 6)
 
-    lay.addWidget(_build_pid_monitor(parent))
+    # Disabled per user request:
+    # lay.addWidget(_build_pid_monitor(parent))
+    lay.addWidget(_build_profile_overview_table(parent))
     lay.addWidget(_build_pid_graph(parent))
     lay.addWidget(_build_profile_wizard(parent))
     lay.addWidget(_build_run_section(parent))
-    lay.addWidget(_build_response_box(parent), stretch=1)
+    # Disabled per user request:
+    # lay.addWidget(_build_response_box(parent), stretch=1)
 
     root.setWidget(inner)
     return root
@@ -337,8 +345,8 @@ def _build_pid_monitor(parent) -> QGroupBox:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-def _build_pid_monitor(parent) -> QGroupBox:
-    grp = _grp("PID  MONITOR  -  REALTIME")
+def _build_profile_overview_table(parent) -> QGroupBox:
+    grp = _grp("PROFILES  OVERVIEW")
     lay = QVBoxLayout()
     lay.setContentsMargins(8, 8, 8, 8)
 
@@ -1394,22 +1402,25 @@ def build_target_profile(parent):
 # mode: 0=SOAK  1=HEAT  2=COOL  — tự tính từ start/stop
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_wizard_seq(parent) -> list:
+def _build_wizard_seq(parent) -> tuple:
     pid    = parent.wiz_profile_id.value()
     n_step = parent.wiz_step_count.value()
 
-    seq = []
-    seq.append(f"temp_profile_set {pid}")   # [0] lệnh mở đầu
-
-    seq.append("y")                          # confirm continue
-    seq.append(str(pid))                     # profile index
-    seq.append(str(parent.wiz_main_ntc.value()))
-    seq.append(str(parent.wiz_sec_ntc.value()))
-    seq.append(str(parent.wiz_tec_mask.value()))
-    seq.append(str(parent.wiz_heater_mask.value()))
-    seq.append(str(int(round(parent.wiz_setpoint.value() * 100))))
-    seq.append(str(int(round(parent.wiz_delta.value()    * 100))))
-    seq.append(str(n_step))
+    start_cmd = "temp_profile_set"
+    
+    # Cấu trúc: (Trigger cụ thể từ Firmware, Phản hồi từ Python)
+    seq = [
+        ("debug@mcu", ""),
+        ("please enter y or n", "y"),
+        ("profile index:", str(pid)),
+        ("main ntc:", str(parent.wiz_main_ntc.value())),
+        ("sec ntc:", str(parent.wiz_sec_ntc.value())),
+        ("tec mask:", str(parent.wiz_tec_mask.value())),
+        ("heater mask:", str(parent.wiz_heater_mask.value())),
+        ("setpoint (0.01*c):", str(int(round(parent.wiz_setpoint.value() * 100)))),
+        ("main-sec delta (0.01*c):", str(int(round(parent.wiz_delta.value() * 100)))),
+        ("step count:", str(n_step))
+    ]
 
     for i in range(n_step):
         start_w, stop_w, dur_w, _ = parent._wiz_steps[i]
@@ -1423,11 +1434,10 @@ def _build_wizard_seq(parent) -> list:
         elif e < s: mv = 2   # COOL
         else:       mv = 0   # SOAK
 
-        # Format: start stop duration mode  (4 số, đúng firmware format)
-        seq.append(f"{sv} {ev} {dv} {mv}")
+        seq.append((f"step[{i}]", f"{sv} {ev} {dv} {mv}"))
 
-    seq.append("y")   # final save confirm; firmware may prompt "Please enter Y or N:"
-    return seq
+    seq.append(("save? (y/n):", "y")) # Lần xác nhận lưu cuối
+    return start_cmd, seq
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1447,12 +1457,15 @@ def _cmd_send_wizard(parent):
         _log_resp(parent, "[WIZ] Already running — click CANCEL first")
         return
 
-    seq = _build_wizard_seq(parent)
-    _log_resp(parent, f"[WIZ] Sequence ({len(seq)} lines):")
-    for i, l in enumerate(seq):
-        _log_resp(parent, f"  [{i}] {l}")
+    if hasattr(parent, "pause_bmp390_for_temp_auto"):
+        parent.pause_bmp390_for_temp_auto()
 
-    sm = WizardStateMachine(parent, seq)
+    start_cmd, seq = _build_wizard_seq(parent)
+    _log_resp(parent, f"[WIZ] Sequence initialized ({len(seq)} steps).")
+    for i, (trig, resp) in enumerate(seq):
+        _log_resp(parent, f"  [{i}] Wait for '{trig}' → Send '{resp}'")
+
+    sm = WizardStateMachine(parent, start_cmd, seq)
     parent._wizard_sm = sm
     sm.finished.connect(lambda ok, msg: _on_wizard_finished(parent, ok, msg))
 
@@ -1502,6 +1515,8 @@ def _cmd_auto_ena(parent):
     _clear_pid_history(parent)
     global_var.pid_graph_session_active = True
     global_var.pid_start_time = time.time()
+    if hasattr(parent, "pause_bmp390_for_temp_auto"):
+        parent.pause_bmp390_for_temp_auto()
 
     _send(parent, f"temp_auto_ena {pid}")
     _log_resp(parent, f"[UI] Auto ENA → profile {pid}")
@@ -1514,7 +1529,17 @@ def _cmd_auto_ena(parent):
 #     _log_resp(parent, f"[UI] Auto START → profile {pid}")
 
 def _cmd_auto_start(parent):
+    import global_var
     pid = parent.tc_run_profile_id.value()
+
+    # If the user starts directly from AUTO START, make sure the graph session
+    # is armed as well. AUTO ENA already does this path before START.
+    if not getattr(global_var, "pid_graph_session_active", False):
+        _clear_pid_history(parent)
+        global_var.pid_graph_session_active = True
+        global_var.pid_start_time = time.time()
+        if hasattr(parent, "pause_bmp390_for_temp_auto"):
+            parent.pause_bmp390_for_temp_auto()
 
     build_target_profile(parent)
 
@@ -1527,6 +1552,8 @@ def _cmd_manu(parent):
     pid = parent.tc_run_profile_id.value()
     global_var.pid_graph_session_active = False
     _send(parent, f"temp_manu {pid}")
+    if hasattr(parent, "resume_bmp390_after_temp_auto"):
+        parent.resume_bmp390_after_temp_auto()
     _log_resp(parent, f"[UI] Manual → profile {pid}")
 
 
@@ -1539,6 +1566,55 @@ def _cmd_toggle_log(parent):
 # UART HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def apply_cli_temp_side_effects(parent, cmd: str):
+    text = str(cmd or "").strip()
+    if not text:
+        return
+
+    parts = text.split()
+    name = parts[0].lower() if parts else ""
+    if name not in {"temp_auto_ena", "temp_auto_start", "temp_manu"}:
+        return
+
+    pid = None
+    if len(parts) >= 2:
+        try:
+            parsed = int(parts[1], 10)
+            if 0 <= parsed <= 7:
+                pid = parsed
+        except Exception:
+            pid = None
+
+    if pid is not None and hasattr(parent, "tc_run_profile_id"):
+        parent.tc_run_profile_id.setValue(pid)
+
+    if name == "temp_auto_ena":
+        import global_var
+        _clear_pid_history(parent)
+        global_var.pid_graph_session_active = True
+        global_var.pid_start_time = time.time()
+        if hasattr(parent, "pause_bmp390_for_temp_auto"):
+            parent.pause_bmp390_for_temp_auto()
+        return
+
+    if name == "temp_auto_start":
+        import global_var
+        if not getattr(global_var, "pid_graph_session_active", False):
+            _clear_pid_history(parent)
+            global_var.pid_graph_session_active = True
+            global_var.pid_start_time = time.time()
+            if hasattr(parent, "pause_bmp390_for_temp_auto"):
+                parent.pause_bmp390_for_temp_auto()
+        build_target_profile(parent)
+        return
+
+    if name == "temp_manu":
+        import global_var
+        global_var.pid_graph_session_active = False
+        if hasattr(parent, "resume_bmp390_after_temp_auto"):
+            parent.resume_bmp390_after_temp_auto()
+
+
 def _send(parent, cmd: str):
     _log_resp(parent, f"→ {cmd}")
     if hasattr(parent, "uart") and parent.uart:
@@ -1550,6 +1626,9 @@ def _send(parent, cmd: str):
 def _log_resp(parent, msg: str):
     if hasattr(parent, "tc_response_box"):
         parent.tc_response_box.append(msg)
+    # Chuyển tiếp log sang terminal MCU chính để người dùng dễ theo dõi tiến độ Wizard
+    if hasattr(parent, "_append_ttys2_log"):
+        parent._append_ttys2_log(f"[WIZARD] {msg}")
 
 
 def _profile_display_cache(parent):
