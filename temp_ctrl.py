@@ -304,12 +304,14 @@ def create_temp_ctrl_tab(parent) -> QWidget:
     lay.setSpacing(10)
     lay.setContentsMargins(6, 6, 6, 6)
 
-    lay.addWidget(_build_pid_monitor(parent))
+    # Disabled per user request:
+    # lay.addWidget(_build_pid_monitor(parent))
     lay.addWidget(_build_profile_overview_table(parent))
     lay.addWidget(_build_pid_graph(parent))
     lay.addWidget(_build_profile_wizard(parent))
     lay.addWidget(_build_run_section(parent))
-    lay.addWidget(_build_response_box(parent), stretch=1)
+    # Disabled per user request:
+    # lay.addWidget(_build_response_box(parent), stretch=1)
 
     root.setWidget(inner)
     return root
@@ -1527,7 +1529,17 @@ def _cmd_auto_ena(parent):
 #     _log_resp(parent, f"[UI] Auto START → profile {pid}")
 
 def _cmd_auto_start(parent):
+    import global_var
     pid = parent.tc_run_profile_id.value()
+
+    # If the user starts directly from AUTO START, make sure the graph session
+    # is armed as well. AUTO ENA already does this path before START.
+    if not getattr(global_var, "pid_graph_session_active", False):
+        _clear_pid_history(parent)
+        global_var.pid_graph_session_active = True
+        global_var.pid_start_time = time.time()
+        if hasattr(parent, "pause_bmp390_for_temp_auto"):
+            parent.pause_bmp390_for_temp_auto()
 
     build_target_profile(parent)
 
@@ -1553,6 +1565,55 @@ def _cmd_toggle_log(parent):
 # ═══════════════════════════════════════════════════════════════════════════════
 # UART HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def apply_cli_temp_side_effects(parent, cmd: str):
+    text = str(cmd or "").strip()
+    if not text:
+        return
+
+    parts = text.split()
+    name = parts[0].lower() if parts else ""
+    if name not in {"temp_auto_ena", "temp_auto_start", "temp_manu"}:
+        return
+
+    pid = None
+    if len(parts) >= 2:
+        try:
+            parsed = int(parts[1], 10)
+            if 0 <= parsed <= 7:
+                pid = parsed
+        except Exception:
+            pid = None
+
+    if pid is not None and hasattr(parent, "tc_run_profile_id"):
+        parent.tc_run_profile_id.setValue(pid)
+
+    if name == "temp_auto_ena":
+        import global_var
+        _clear_pid_history(parent)
+        global_var.pid_graph_session_active = True
+        global_var.pid_start_time = time.time()
+        if hasattr(parent, "pause_bmp390_for_temp_auto"):
+            parent.pause_bmp390_for_temp_auto()
+        return
+
+    if name == "temp_auto_start":
+        import global_var
+        if not getattr(global_var, "pid_graph_session_active", False):
+            _clear_pid_history(parent)
+            global_var.pid_graph_session_active = True
+            global_var.pid_start_time = time.time()
+            if hasattr(parent, "pause_bmp390_for_temp_auto"):
+                parent.pause_bmp390_for_temp_auto()
+        build_target_profile(parent)
+        return
+
+    if name == "temp_manu":
+        import global_var
+        global_var.pid_graph_session_active = False
+        if hasattr(parent, "resume_bmp390_after_temp_auto"):
+            parent.resume_bmp390_after_temp_auto()
+
 
 def _send(parent, cmd: str):
     _log_resp(parent, f"→ {cmd}")

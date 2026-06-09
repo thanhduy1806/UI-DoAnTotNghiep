@@ -33,6 +33,7 @@ pid_profile_latest = {
     i: {"step": "NONE", "sp": 0.0, "pv": 0.0, "err": 0.0, "out": 0.0}
     for i in range(8)
 }
+pid_display_dirty = False
 
 laser_drive_current = {i: None for i in range(1, 25)}
 photo_current = {i: None for i in range(1, 25)}

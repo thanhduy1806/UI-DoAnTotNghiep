@@ -24,6 +24,7 @@ from theme import outline_button_style, toggle_theme
 # TEMP SYSTEM
 from temp_ctrl import (
     apply_temp_ctrl_theme,
+    apply_cli_temp_side_effects,
     create_temp_ctrl_tab,
     update_pid_display,
     pipe_to_response
@@ -32,6 +33,9 @@ from temp_ctrl import (
 from exp_manual import create_manual_group_box
 from exp_manual import apply_manual_theme
 from exp_auto import create_auto_group_box
+
+
+PID_UI_REFRESH_MS = 150
 
 
 class ConsoleTerminal(QTextEdit):
@@ -256,7 +260,7 @@ class CubeSatMonitor(QWidget):
             lambda: self._safe_pid_update()
         )
 
-        self.timer.start(1000)
+        self.timer.start(PID_UI_REFRESH_MS)
 
         self.bmp390_timer = QTimer()
         self.bmp390_timer.timeout.connect(self._poll_bmp390)
@@ -324,9 +328,11 @@ class CubeSatMonitor(QWidget):
         )
 
     def _safe_pid_update(self):
-
         try:
+            if not getattr(global_var, "pid_display_dirty", False):
+                return
             update_pid_display(self)
+            global_var.pid_display_dirty = False
 
         except Exception as e:
             print("PID update error:", e)
@@ -580,6 +586,7 @@ class CubeSatMonitor(QWidget):
         is_interrupt = normalized_cmd in {"ctrl+c", "^c", "interrupt"}
 
         if target == "ttyS2":
+            apply_cli_temp_side_effects(self, cmd)
             if is_interrupt and hasattr(self.uart, "send_interrupt"):
                 self.uart.send_interrupt()
             else:

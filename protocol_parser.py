@@ -5,7 +5,6 @@ import global_var
 
 from uart_ui import auto_detect_state
 from temp_ctrl import (
-    update_pid_display,
     pipe_to_response
 )
 from bmp390 import update_bmp390_ui
@@ -160,6 +159,17 @@ def _selected_profile_id():
     return 0
 
 
+def _is_idle_profile_sample(step_text, sp, pv, out, err):
+    if str(step_text).strip().upper() != "NONE":
+        return False
+    return (
+        abs(float(sp)) < 1e-9
+        and abs(float(pv)) < 1e-9
+        and abs(float(out)) < 1e-9
+        and abs(float(err)) < 1e-9
+    )
+
+
 def parse_uart_line(line: str):
     line = line.strip()
     if not line:
@@ -197,20 +207,24 @@ def parse_uart_line(line: str):
             out = float(m.group(7))
             err = float(m.group(8))
 
-            _push_profile_history(profile_id, sp, pv, out, err)
             if mode is not None:
                 mode_name = {"0": "SOAK", "1": "HEAT", "2": "COOL"}.get(mode, "NONE")
                 step_text = f"{step}:{mode_name}"
             else:
                 step_text = step
 
-            global_var.pid_profile_latest[profile_id] = {
+            latest_row = {
                 "step": step_text,
                 "sp": sp,
                 "pv": pv,
                 "err": err,
                 "out": out,
             }
+            previous_row = getattr(global_var, "pid_profile_latest", {}).get(profile_id)
+            row_changed = latest_row != previous_row
+            idle_zero = _is_idle_profile_sample(step_text, sp, pv, out, err)
+
+            global_var.pid_profile_latest[profile_id] = latest_row
 
             if profile_id == _selected_profile_id():
                 global_var.pid_step = step_text
@@ -219,8 +233,11 @@ def parse_uart_line(line: str):
                 global_var.pid_out = out
                 global_var.pid_err = err
 
-            if global_var.window:
-                update_pid_display(global_var.window)
+            if not idle_zero:
+                _push_profile_history(profile_id, sp, pv, out, err)
+
+            if not idle_zero or row_changed or profile_id == _selected_profile_id():
+                global_var.pid_display_dirty = True
             return
 
     except Exception as e:
@@ -262,8 +279,7 @@ def parse_uart_line(line: str):
             except:
                 pass
 
-            if global_var.window:
-                update_pid_display(global_var.window)
+            global_var.pid_display_dirty = True
             return
 
     except Exception as e:
@@ -285,8 +301,7 @@ def parse_uart_line(line: str):
 
             _push_history()
 
-            if global_var.window:
-                update_pid_display(global_var.window)
+            global_var.pid_display_dirty = True
             return
 
     except Exception as e:
