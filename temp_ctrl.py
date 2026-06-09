@@ -534,7 +534,7 @@ def _build_profile_wizard(parent) -> QGroupBox:
         "Gửi wizard tự động — chờ từng prompt firmware\n"
         "Mode (HEAT/COOL/SOAK) do firmware tự quyết định"
     )
-    send_btn.clicked.connect(lambda: _cmd_send_wizard(parent))
+    send_btn.clicked.connect(lambda: _cmd_temperature_profile_set(parent))
     parent._wiz_send_btn = send_btn
 
     cancel_btn = _action_btn("CANCEL", ACCENT_ERR, h=28, w=90)
@@ -1450,6 +1450,62 @@ def _cmd_display_profile(parent):
     parent._profile_display_pending_at = time.time()
     _send(parent, f"temp_profile_diplay {pid}")
     _parse_profile_display_log_tail(parent, pid)
+
+
+
+
+#####################################################################
+def _cmd_temperature_profile_set(parent):
+    pid    = parent.wiz_profile_id.value()
+    m_ntc  = parent.wiz_main_ntc.value()
+    s_ntc  = parent.wiz_sec_ntc.value()
+    t_mask = parent.wiz_tec_mask.value()
+    h_mask = parent.wiz_heater_mask.value()
+    sp     = int(round(parent.wiz_setpoint.value() * 100))
+    dt     = int(round(parent.wiz_delta.value() * 100))
+    step_count = parent.wiz_step_count.value()
+
+    params = [
+        str(pid),
+        str(m_ntc),
+        str(s_ntc),
+        str(t_mask),
+        str(h_mask),
+        str(sp),
+        str(dt),
+        str(step_count),
+    ]
+
+    for i in range(step_count):
+        start_w, stop_w, dur_w, _ = parent._wiz_steps[i]
+
+        start = int(round(start_w.value() * 100))
+        stop  = int(round(stop_w.value() * 100))
+        dura  = int(dur_w.value())
+
+        if stop > start:
+            mode = 1      # HEAT
+        elif stop < start:
+            mode = 2      # COOL
+        else:
+            mode = 0      # SOAK
+
+        params.extend([
+            str(start),
+            str(stop),
+            str(dura),
+            str(mode),
+        ])
+
+    cmd = "temp_prof_set " + " ".join(params)
+
+    _send(parent, cmd)
+    _log_resp(parent, f"[UI] Profile SET → ID {pid}")
+
+
+
+
+
 
 
 def _cmd_send_wizard(parent):
