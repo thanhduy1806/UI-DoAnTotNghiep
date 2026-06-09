@@ -194,6 +194,7 @@ class WizardStateMachine(QObject):
         self._seq    = seq
         self._idx    = 0
         self._active = False
+        self._seen_saved = False
 
         self._timeout = QTimer(self)
         self._timeout.setSingleShot(True)
@@ -202,6 +203,7 @@ class WizardStateMachine(QObject):
     def start(self):
         self._active = True
         self._idx    = 0
+        self._seen_saved = False
         _send(self._parent, self._start_cmd)
         _log_resp(self._parent, f"[WIZ] Started — Waiting for first prompt...")
         self._reset_timeout()
@@ -211,10 +213,12 @@ class WizardStateMachine(QObject):
             return
 
         line_l = line.lower()
+        if "saved" in line_l:
+            self._seen_saved = True
 
         # Nếu đã gửi hết kịch bản chính, kiểm tra tín hiệu kết thúc
         if self._idx >= len(self._seq):
-            if any(k in line_l for k in ["saved", "debug@mcu"]):
+            if self._seen_saved and "debug@mcu" in line_l:
                 self._finish(True, "Profile saved ✓")
             return
 
@@ -229,6 +233,17 @@ class WizardStateMachine(QObject):
                 _send(self._parent, resp)
                 self._reset_timeout()
                 return  # Đã phản hồi xong cho dòng này
+
+        for i in range(0, self._idx):
+            trigger, resp = self._seq[i]
+            if not trigger.lower().startswith("step["):
+                continue
+            if trigger.lower() not in line_l:
+                continue
+            _log_resp(self._parent, f"[WIZ {self._idx}/{len(self._seq)}] Retry: '{trigger}' â†’ Sending: '{resp}'")
+            _send(self._parent, resp)
+            self._reset_timeout()
+            return
 
     def cancel(self):
         self._active = False
@@ -290,6 +305,7 @@ def create_temp_ctrl_tab(parent) -> QWidget:
     lay.setContentsMargins(6, 6, 6, 6)
 
     lay.addWidget(_build_pid_monitor(parent))
+    lay.addWidget(_build_profile_overview_table(parent))
     lay.addWidget(_build_pid_graph(parent))
     lay.addWidget(_build_profile_wizard(parent))
     lay.addWidget(_build_run_section(parent))
@@ -327,8 +343,8 @@ def _build_pid_monitor(parent) -> QGroupBox:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-def _build_pid_monitor(parent) -> QGroupBox:
-    grp = _grp("PID  MONITOR  -  REALTIME")
+def _build_profile_overview_table(parent) -> QGroupBox:
+    grp = _grp("PROFILES  OVERVIEW")
     lay = QVBoxLayout()
     lay.setContentsMargins(8, 8, 8, 8)
 
@@ -1388,10 +1404,11 @@ def _build_wizard_seq(parent) -> tuple:
     pid    = parent.wiz_profile_id.value()
     n_step = parent.wiz_step_count.value()
 
-    start_cmd = f"temp_profile_set {pid}"
+    start_cmd = "temp_profile_set"
     
     # Cấu trúc: (Trigger cụ thể từ Firmware, Phản hồi từ Python)
     seq = [
+        ("debug@mcu", ""),
         ("please enter y or n", "y"),
         ("profile index:", str(pid)),
         ("main ntc:", str(parent.wiz_main_ntc.value())),
@@ -1399,6 +1416,7 @@ def _build_wizard_seq(parent) -> tuple:
         ("tec mask:", str(parent.wiz_tec_mask.value())),
         ("heater mask:", str(parent.wiz_heater_mask.value())),
         ("setpoint (0.01*c):", str(int(round(parent.wiz_setpoint.value() * 100)))),
+        ("main-sec delta (0.01*c):", str(int(round(parent.wiz_delta.value() * 100)))),
         ("step count:", str(n_step))
     ]
 
@@ -1416,7 +1434,7 @@ def _build_wizard_seq(parent) -> tuple:
 
         seq.append((f"step[{i}]", f"{sv} {ev} {dv} {mv}"))
 
-    seq.append(("please enter y or n", "y")) # Lần xác nhận lưu cuối
+    seq.append(("save? (y/n):", "y")) # Lần xác nhận lưu cuối
     return start_cmd, seq
 
 
@@ -1547,6 +1565,9 @@ def _send(parent, cmd: str):
 def _log_resp(parent, msg: str):
     if hasattr(parent, "tc_response_box"):
         parent.tc_response_box.append(msg)
+    # Chuyển tiếp log sang terminal MCU chính để người dùng dễ theo dõi tiến độ Wizard
+    if hasattr(parent, "_append_ttys2_log"):
+        parent._append_ttys2_log(f"[WIZARD] {msg}")
 
 
 def _profile_display_cache(parent):

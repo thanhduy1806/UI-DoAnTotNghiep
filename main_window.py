@@ -1,10 +1,11 @@
 from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout,
-    QTextEdit, QTabWidget,
+    QTextEdit, QTabWidget, QScrollArea,
     QGridLayout, QFrame, QLabel, QPushButton,
     QSizePolicy, QSplitter, QLineEdit
 )
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QEvent, QTimer, Qt
+from PyQt5.QtGui import QTextCursor
 
 import pyqtgraph as pg
 
@@ -12,7 +13,7 @@ import pyqtgraph as pg
 import global_var
 
 # UART + Parser
-from uart_ui import apply_uart_theme, create_uart_group_box
+from uart_ui import apply_uart_theme, create_uart_group_box, select_if_uart_target
 from protocol_parser import parse_uart_line
 
 # Sensors
@@ -33,7 +34,165 @@ from exp_manual import apply_manual_theme
 from exp_auto import create_auto_group_box
 
 
-BMP390_POLL_INTERVAL_MS = 5 * 60 * 1000
+class ConsoleTerminal(QTextEdit):
+    def __init__(self, owner, target):
+        super().__init__(owner)
+        self._owner = owner
+        self._target = target
+        self._input_start = 0
+        self._echo_suppress = []
+
+        self.setReadOnly(False)
+        self.setAcceptRichText(False)
+        self.setUndoRedoEnabled(False)
+        self.setLineWrapMode(QTextEdit.NoWrap)
+        self.setProperty("command_target", target)
+        self.installEventFilter(owner)
+
+    def append_output(self, text):
+        text = self._format_terminal_text(str(text))
+        if self._should_suppress_echo(text):
+            return
+
+        pending_input, cursor_offset = self._detach_pending_input()
+
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.setTextCursor(cursor)
+        QTextEdit.append(self, text)
+        self.mark_input_start()
+        self._restore_pending_input(pending_input, cursor_offset)
+
+    def mark_input_start(self):
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.setTextCursor(cursor)
+        self._input_start = cursor.position()
+
+    def trim_history(self, max_lines):
+        pending_input, cursor_offset = self._detach_pending_input()
+        doc = self.document()
+
+        while doc.blockCount() > max_lines:
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.Start)
+            cursor.select(QTextCursor.LineUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
+
+        self.mark_input_start()
+        self._restore_pending_input(pending_input, cursor_offset)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self._submit_current_input()
+            return
+
+        if event.key() == Qt.Key_Home:
+            cursor = self.textCursor()
+            cursor.setPosition(self._input_start)
+            self.setTextCursor(cursor)
+            return
+
+        if event.key() in (Qt.Key_Backspace, Qt.Key_Left):
+            cursor = self.textCursor()
+            if cursor.position() <= self._input_start and not cursor.hasSelection():
+                return
+
+        self._keep_cursor_in_input()
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+
+    def _submit_current_input(self):
+        cmd = self._current_input()
+        if not self._owner._send_console_text_command(self._target, cmd):
+            return
+
+        if cmd:
+            self._echo_suppress.append(cmd.strip())
+            self._echo_suppress = self._echo_suppress[-5:]
+
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.setTextCursor(cursor)
+        self.mark_input_start()
+
+    def _current_input(self):
+        return self.toPlainText()[self._input_start:]
+
+    def _detach_pending_input(self):
+        full_text = self.toPlainText()
+        start = max(0, min(self._input_start, len(full_text)))
+        pending_input = full_text[start:]
+
+        cursor = self.textCursor()
+        cursor_offset = max(0, min(cursor.position() - start, len(pending_input)))
+
+        if pending_input:
+            remove_cursor = self.textCursor()
+            remove_cursor.setPosition(start)
+            remove_cursor.setPosition(len(full_text), QTextCursor.KeepAnchor)
+            remove_cursor.removeSelectedText()
+            self.setTextCursor(remove_cursor)
+            self._input_start = start
+
+        return pending_input, cursor_offset
+
+    def _restore_pending_input(self, pending_input, cursor_offset):
+        if not pending_input:
+            return
+
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.setTextCursor(cursor)
+        self.insertPlainText(pending_input)
+
+        restored_pos = self._input_start + max(
+            0,
+            min(int(cursor_offset), len(pending_input)),
+        )
+        cursor = self.textCursor()
+        cursor.setPosition(restored_pos)
+        self.setTextCursor(cursor)
+
+    def _keep_cursor_in_input(self):
+        cursor = self.textCursor()
+        if cursor.hasSelection() and cursor.selectionStart() < self._input_start:
+            cursor.clearSelection()
+            cursor.movePosition(QTextCursor.End)
+            self.setTextCursor(cursor)
+            return
+        if cursor.position() < self._input_start:
+            cursor.movePosition(QTextCursor.End)
+            self.setTextCursor(cursor)
+
+    def _format_terminal_text(self, text):
+        stripped = text.strip()
+        if stripped == ">>>":
+            return ">>> "
+        if stripped.startswith("root@") and stripped.endswith(("#", "$")):
+            return stripped + " "
+        return text
+
+    def _should_suppress_echo(self, text):
+        stripped = text.strip()
+        if not stripped:
+            return False
+
+        for cmd in list(self._echo_suppress):
+            if stripped == cmd or stripped in (f">>> {cmd}", f">>>{cmd}"):
+                self._echo_suppress.remove(cmd)
+                return True
+
+            if stripped.endswith(cmd):
+                prefix = stripped[:-len(cmd)].strip()
+                if prefix.endswith(("#", "$", ">>>")):
+                    self._echo_suppress.remove(cmd)
+                    return True
+
+        return False
 
 
 # ─── COLOR PALETTE ─────────────────────────────────────────────
@@ -101,8 +260,8 @@ class CubeSatMonitor(QWidget):
 
         self.bmp390_timer = QTimer()
         self.bmp390_timer.timeout.connect(self._poll_bmp390)
-        self._bmp390_paused_for_temp_auto = False
-        self.bmp390_timer.start(BMP390_POLL_INTERVAL_MS)
+        # Disabled for now so bmp390_int_read cannot interrupt interactive UART flows.
+        # self.bmp390_timer.start(10000)
 
         self._apply_theme()
     
@@ -117,12 +276,18 @@ class CubeSatMonitor(QWidget):
             if box is None:
                 return
 
-            box.append(text)
+            if hasattr(box, "append_output"):
+                box.append_output(text)
+            else:
+                box.append(text)
 
             # chỉ giữ 200 dòng gần nhất
-            doc = box.document()
-
             MAX_LINES = 200
+            if hasattr(box, "trim_history"):
+                box.trim_history(MAX_LINES)
+                return
+
+            doc = box.document()
 
             while doc.blockCount() > MAX_LINES:
 
@@ -145,6 +310,8 @@ class CubeSatMonitor(QWidget):
         self._append_ttys2_log(text)
 
     def _append_ttys2_log(self, text):
+        if str(text).startswith("[WIZARD]"):
+            return
         self._append_log_to_box(
             getattr(self, "log_box_ttys2", None),
             text,
@@ -166,31 +333,26 @@ class CubeSatMonitor(QWidget):
 
     def _poll_bmp390(self):
         try:
-            if getattr(self, "_bmp390_paused_for_temp_auto", False):
-                return
-            if getattr(global_var, "pid_graph_session_active", False):
-                return
             if not hasattr(self, "uart") or not self.uart:
                 return
             if not getattr(self.uart, "ser", None):
                 return
+            if self._is_wizard_active():
+                return
+            if getattr(self, "_connection_mode", None) == "uart":
+                if getattr(self.uart, "active_target", None) != "ttyS2":
+                    return
+                if not getattr(self.uart, "_minicom_ready", False):
+                    return
 
             self.uart.send_command("bmp390_int_read")
 
         except Exception as e:
             print("BMP390 poll error:", e)
 
-    def pause_bmp390_for_temp_auto(self):
-        self._bmp390_paused_for_temp_auto = True
-        if hasattr(self, "bmp390_timer") and self.bmp390_timer.isActive():
-            self.bmp390_timer.stop()
-
-    def resume_bmp390_after_temp_auto(self, poll_now=True):
-        self._bmp390_paused_for_temp_auto = False
-        if hasattr(self, "bmp390_timer") and not self.bmp390_timer.isActive():
-            self.bmp390_timer.start(BMP390_POLL_INTERVAL_MS)
-        if poll_now:
-            QTimer.singleShot(300, self._poll_bmp390)
+    def _is_wizard_active(self):
+        wizard = getattr(self, "_wizard_sm", None)
+        return bool(wizard and wizard.is_active())
 
     def _toggle_theme(self):
         toggle_theme()
@@ -305,6 +467,7 @@ class CubeSatMonitor(QWidget):
 
         self._log_title_labels = []
         self._console_inputs = {}
+        self._console_terminals = {}
         self._console_send_buttons = {}
         splitter = QSplitter(Qt.Vertical)
 
@@ -340,50 +503,60 @@ class CubeSatMonitor(QWidget):
         label = QLabel(title)
         self._log_title_labels.append(label)
 
-        log_box = QTextEdit()
-        log_box.setReadOnly(True)
+        if command_target:
+            log_box = ConsoleTerminal(self, command_target)
+        else:
+            log_box = QTextEdit()
+            log_box.setReadOnly(True)
 
         lay.addWidget(label)
         lay.addWidget(log_box)
 
         if command_target:
-            row = QHBoxLayout()
-            row.setSpacing(5)
-            row.setContentsMargins(0, 0, 0, 0)
-
-            command_input = QLineEdit()
-            display_target = {"ttyS2": "MCU", "ttyS5": "MPU"}.get(
-                command_target,
-                command_target,
-            )
-            command_input.setPlaceholderText(f"command {display_target}")
-            command_input.setFixedHeight(24)
-            command_input.returnPressed.connect(
-                lambda target=command_target: self._send_console_command(target)
-            )
-
-            send_btn = QPushButton("Send")
-            send_btn.setFixedHeight(24)
-            send_btn.setFixedWidth(56)
-            send_btn.clicked.connect(
-                lambda _, target=command_target: self._send_console_command(target)
-            )
-
-            self._console_inputs[command_target] = command_input
-            self._console_send_buttons[command_target] = send_btn
-
-            if command_target == "ttyS2":
-                self.ttys2_input = command_input
-                self.ttys2_send_btn = send_btn
-            elif command_target == "ttyS5":
-                self.ttys5_input = command_input
-                self.ttys5_send_btn = send_btn
-
-            row.addWidget(command_input)
-            row.addWidget(send_btn)
-            lay.addLayout(row)
+            self._console_terminals[command_target] = log_box
 
         return frame, log_box
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.FocusIn:
+            target = obj.property("command_target")
+            if target in ("ttyS2", "ttyS5"):
+                self._activate_command_target(target, notify=False)
+        elif event.type() == QEvent.KeyPress:
+            target = obj.property("command_target")
+            if (
+                target in ("ttyS2", "ttyS5")
+                and event.key() == Qt.Key_C
+                and event.modifiers() & Qt.ControlModifier
+            ):
+                if hasattr(obj, "textCursor") and obj.textCursor().hasSelection():
+                    obj.copy()
+                    event.accept()
+                    return True
+                self._send_console_interrupt(target)
+                event.accept()
+                return True
+
+        return super().eventFilter(obj, event)
+
+    def _send_console_interrupt(self, target):
+        if not hasattr(self, "uart") or not self.uart:
+            self._append_console_error(target, "Not connected")
+            return
+
+        if not self._activate_command_target(target, notify=True):
+            return
+
+        command_input = getattr(self, "_console_inputs", {}).get(target)
+        if command_input is not None:
+            command_input.clear()
+
+        if target == "ttyS2" and hasattr(self.uart, "send_interrupt"):
+            self.uart.send_interrupt()
+        elif target == "ttyS5" and hasattr(self.uart, "send_ttys5_interrupt"):
+            self.uart.send_ttys5_interrupt()
+        else:
+            self._append_console_error(target, "Interrupt not available")
 
     def _send_console_command(self, target):
         command_input = getattr(self, "_console_inputs", {}).get(target)
@@ -391,21 +564,76 @@ class CubeSatMonitor(QWidget):
             return
 
         cmd = command_input.text()
-        if not cmd:
-            return
+        if self._send_console_text_command(target, cmd):
+            command_input.clear()
+
+    def _send_console_text_command(self, target, cmd):
+        normalized_cmd = str(cmd).strip().lower()
 
         if not hasattr(self, "uart") or not self.uart:
             self._append_console_error(target, "Not connected")
-            return
+            return False
+
+        if not self._activate_command_target(target, notify=True):
+            return False
+
+        is_interrupt = normalized_cmd in {"ctrl+c", "^c", "interrupt"}
 
         if target == "ttyS2":
-            self.uart.send_command(cmd)
-            command_input.clear()
-        elif target == "ttyS5" and hasattr(self.uart, "send_ttys5_command"):
-            self.uart.send_ttys5_command(cmd)
-            command_input.clear()
+            if is_interrupt and hasattr(self.uart, "send_interrupt"):
+                self.uart.send_interrupt()
+            else:
+                self.uart.send_command(cmd)
+            return True
+
+        if target == "ttyS5" and hasattr(self.uart, "send_ttys5_command"):
+            if is_interrupt and hasattr(self.uart, "send_ttys5_interrupt"):
+                self.uart.send_ttys5_interrupt()
+            else:
+                self.uart.send_ttys5_command(cmd)
+            return True
+
+        self._append_console_error(target, "Not available")
+        return False
+
+    def _activate_command_target(self, target, notify=True):
+        if getattr(self, "_connection_mode", None) != "uart":
+            return True
+
+        if target not in ("ttyS2", "ttyS5"):
+            return True
+
+        connected = bool(getattr(self, "_connection_active", False))
+        uart = getattr(self, "uart", None)
+        previous_target = getattr(uart, "active_target", None)
+        pending_target = getattr(uart, "_pending_target", None)
+
+        select_if_uart_target(self, target)
+
+        if not connected or not uart or not hasattr(uart, "switch_target"):
+            return True
+
+        if previous_target != target:
+            if notify:
+                if pending_target == target:
+                    self._append_console_info(target, "IF UART target is switching")
+                else:
+                    self._append_console_info(target, "Switching IF UART target, wait for READY")
+            return False
+
+        if not getattr(uart, "_bridge_ready", False):
+            if notify:
+                self._append_console_info(target, "IF UART target is not ready")
+            return False
+
+        return True
+
+    def _append_console_info(self, target, message):
+        text = f"[{target}] {message}"
+        if target == "ttyS5":
+            self._append_ttys5_log(text)
         else:
-            self._append_console_error(target, "Not available")
+            self._append_ttys2_log(text)
 
     def _append_console_error(self, target, message):
         text = f"[{target} TX ERROR] {message}"
@@ -434,9 +662,21 @@ class CubeSatMonitor(QWidget):
 
     def _build_right(self):
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+
         box = QFrame()
+        box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         lay = QVBoxLayout(box)
         lay.setSpacing(8)
+        lay.setContentsMargins(0, 0, 0, 0)
 
         self.tabs = QTabWidget()
 
@@ -454,7 +694,10 @@ class CubeSatMonitor(QWidget):
 
         lay.addWidget(self.uart_box, stretch=0)
 
-        return box
+        scroll.setWidget(box)
+        self.right_scroll_area = scroll
+
+        return scroll
 
     # ═══════════════════════════════════════════════════════
     # UART RX
@@ -463,7 +706,6 @@ class CubeSatMonitor(QWidget):
     def process_uart_data(self, line):
 
         try:
-
             line = str(line).strip()
 
             if not line:
@@ -471,9 +713,6 @@ class CubeSatMonitor(QWidget):
 
             # PARSER
             parse_uart_line(line)
-
-            # TEMP CTRL RESPONSE
-            pipe_to_response(self, line)
 
         except Exception as e:
 
