@@ -149,7 +149,7 @@ def create_manual_group_box(parent):
     parent._laser_buttons = {}
 
     for pos in range(1, 25):          # 1 … 24
-        row = (pos - 1) // 4
+        row = 5 - ((pos - 1) // 4)
         col = (pos - 1) % 4
 
         btn = _LaserButton(pos)
